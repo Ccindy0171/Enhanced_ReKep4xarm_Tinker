@@ -24,7 +24,7 @@ The following changes and additions are based on the original repository. The co
 - TASK Instruction: Pick up the red block and drop it into the box
 - PS: To save time and computational resources, the `path solver` was not used in this video, so the 2nd transition process appears somewhat unnatural.
 
-![demo](https://github.com/youngfriday/Enhanced_ReKep4xarm/blob/master/demo.mp4)
+https://github.com/user-attachments/assets/512991e5-2401-4ae1-913f-e09249200794
 
 ## To Prepare
 
