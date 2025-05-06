@@ -20,19 +20,20 @@
 
 ## A Simple Video
 
-- **TASK Instruction:** pick up the red block and drop it into the box
-- 为了节省时间与运算空间：此视频中没有使用`path solver`，所以第二个转换过程略显不自然
+- ***TASK Instruction:*** **pick up the red block and drop it into the box**
+
+> 为了节省时间与运算空间：此视频中没有使用`path solver`，所以第二个转换过程略显不自然
 
 https://github.com/user-attachments/assets/512991e5-2401-4ae1-913f-e09249200794https://github.com/user-attachments/assets/512991e5-2401-4ae1-913f-e09249200794
 
 ## To Prepare
 
-- **通讯器：**为了尽可能满足各个模块的环境，使用 [ROS](https://www.ros.org/) 进行通讯，尤其是向多个模块传输图像
-- **xArm6 控制器：**本项目使用 [xArm-Python-SDK](https://github.com/xArm-Developer/xArm-Python-SDK)
-- **RGB-D 相机：**realsense d435i，使用 [realsense-ros](https://github.com/IntelRealSense/realsense-ros) 发布图像
-- **系统与显卡：**目前在一台Ubuntu 20.04上运行，配备一台10GB的Nvidia 3080显卡，为了防止显存溢出，我选择将 [SoM] 部分提前分开运行。 
-- **环境：**各个子模块的环境，请严格依照原项目配置，最终同时分开运行
-- **CUDA：**12.1
+- ***通讯器：*** 为了尽可能满足各个模块的环境，使用 [ROS](https://www.ros.org/) 进行通讯，尤其是向多个模块传输图像
+- ***xArm6 控制器：*** 本项目使用 [xArm-Python-SDK](https://github.com/xArm-Developer/xArm-Python-SDK)
+- ***RGB-D 相机：*** realsense d435i，使用 [realsense-ros](https://github.com/IntelRealSense/realsense-ros) 发布图像。同时注意提前将你的相机外参矩阵（SE(3)4x4）保存为`camera_extrinsic1.npy` 放到根目录中。
+- ***系统与显卡：*** 目前在一台Ubuntu 20.04上运行，配备一台10GB的Nvidia 3080显卡，为了防止显存溢出，我选择将 [SoM] 部分提前分开运行。 
+- ***环境：*** 各个子模块的环境，请严格依照原项目配置，最终同时分开运行
+- ***CUDA：*** 12.1
 
 ## Reference
 
