@@ -23,7 +23,7 @@
 - **TASK Instruction:** pick up the red block and drop it into the box
 - 为了节省时间与运算空间：此视频中没有使用`path solver`，所以第二个转换过程略显不自然
 
-https://github.com/youngfriday/Enhanced_ReKep4xarm/blob/master/demo.mp4
+![demo](https://github.com/youngfriday/Enhanced_ReKep4xarm/blob/master/demo.mp4)
 
 ## To Prepare
 
