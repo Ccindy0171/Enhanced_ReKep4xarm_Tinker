@@ -1,0 +1,13 @@
+image: data/grasp/color2.png
+
+task: "pick up the red block and drop it into the box'" 
+granularity1: 1.9
+granularity2: 1.8
+output: grasp/mask.npy
+response: grasp/response_grasp.txt
+filter:
+  corner: True
+  area: True
+  intersection: True
+  area_thresh: 150
+  intersection_thresh: 0.5
