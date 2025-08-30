@@ -33,7 +33,7 @@ def point_tracking_callback(msg):
     
 
 class ReKepEnv:
-    def __init__(self, config, robot, camera,endeffector, verbose=False):
+    def __init__(self, config, robot, camera, endeffector, verbose=False):
         self.video_cache = []
         self.config = config
         self.verbose = verbose
