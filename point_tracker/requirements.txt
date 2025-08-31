@@ -1,0 +1,10 @@
+torch>=1.9.0
+torchvision
+opencv-python
+numpy
+tree
+pyrealsense2
+rclpy
+sensor_msgs
+std_msgs
+cv_bridge

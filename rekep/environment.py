@@ -1,7 +1,7 @@
 import time
 import numpy as np
 import os
-import rospy
+import rclpy
 from std_msgs.msg import Int32MultiArray
 from scipy.spatial.transform import Rotation as R
 # from endeffector import EndEffector
@@ -33,7 +33,7 @@ def point_tracking_callback(msg):
     
 
 class ReKepEnv:
-    def __init__(self, config, robot, camera,endeffector, verbose=False):
+    def __init__(self, config, robot, camera, endeffector, node=None, verbose=False):
         self.video_cache = []
         self.config = config
         self.verbose = verbose
@@ -44,15 +44,15 @@ class ReKepEnv:
         self.endeffector = endeffector
         self.robot = robot
         self.camera = camera
-        global tracking_points,point_idx,POINTS_CALLBACK
+        self.node = node  # ROS2 node for subscriptions
+        
+        global tracking_points, point_idx, POINTS_CALLBACK
         POINTS_CALLBACK = False
         tracking_points = []
         point_idx = []
         
-        gripper_pos=self.robot.get_gripper_position()
-        # 初始化ROS节点
-        # rospy.init_node('point_tracking_subscriber_node')
-        if gripper_pos[1]>700:
+        gripper_pos = self.robot.get_gripper_position()
+        if gripper_pos[1] > 700:
             self.gripper_state = int(0)
         else:
             self.gripper_state = int(1)
@@ -129,12 +129,15 @@ class ReKepEnv:
         keypoint_positions = []
         # 订阅ros节点消息
         # 订阅/当前追踪点的位置消息
-        if not POINTS_CALLBACK:
-            rospy.Subscriber('/current_tracking_points', Int32MultiArray, point_tracking_callback)
+        if not POINTS_CALLBACK and self.node is not None:
+            self.tracking_sub = self.node.create_subscription(
+                Int32MultiArray, '/current_tracking_points', 
+                point_tracking_callback, 10)
             # 等待回调函数填充数据
             while not tracking_points or not point_idx:
-                rospy.loginfo("Waiting for tracking points to be updated...")
-                rospy.sleep(0.1)  # 等待 100ms
+                if self.node:
+                    self.node.get_logger().info("Waiting for tracking points to be updated...")
+                rclpy.spin_once(self.node, timeout_sec=0.1)
 
         
         print("tracking_points", tracking_points)

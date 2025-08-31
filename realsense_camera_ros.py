@@ -1,4 +1,5 @@
-import rospy
+import rclpy
+from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 import numpy as np
@@ -7,17 +8,16 @@ from scipy.ndimage import label
 from PIL import Image as PILImage
 
 
-class RealSenseCamera:
+class RealSenseCamera(Node):
     def __init__(self):
-        # # 初始化 ROS 节点
-        # rospy.init_node("realsense_camera", anonymous=True)
-
+        super().__init__('realsense_camera_node')
+        
         # 创建 CvBridge 对象，用于将 ROS 图像消息转换为 OpenCV 图像
         self.bridge = CvBridge()
 
         # 订阅 RealSense 相机的 RGB 和深度图像
-        self.rgb_sub = rospy.Subscriber("/camera/color/image_raw", Image, self.rgb_callback)
-        self.depth_sub = rospy.Subscriber("/camera/aligned_depth_to_color/image_raw", Image, self.depth_callback)  # NOTE：must sub the aligned depth image
+        self.rgb_sub = self.create_subscription(Image, "/camera/color/image_raw", self.rgb_callback, 10)
+        self.depth_sub = self.create_subscription(Image, "/camera/aligned_depth_to_color/image_raw", self.depth_callback, 10)  # NOTE：must sub the aligned depth image
         self.rgb_image = None
         self.depth_image = None
 
@@ -42,10 +42,12 @@ class RealSenseCamera:
             else:
                 raise ValueError("Expected a 4x4 transformation matrix")
         except Exception as e:
-            print(f"Failed to load extrinsics: {e}")
+            self.get_logger().warn(f"Failed to load extrinsics: {e}")
             self.R, self.t = np.eye(3), np.array([[0], [0], [0]])
             self.transform_matrix = np.eye(4)
             self.loaded_extrinsics = False
+            
+        self.get_logger().info("RealSenseCamera initialized")
 
     def rgb_callback(self, msg):
         """处理接收到的 RGB 图像消息"""
@@ -220,28 +222,45 @@ class RealSenseCamera:
 
 
     def close(self):
-        rospy.signal_shutdown("Shutting down ROS node")
+        """Shutdown the ROS2 node"""
+        self.destroy_node()
+
+
+def main(args=None):
+    """Main function to run the camera node"""
+    rclpy.init(args=args)
+    
+    try:
+        camera = RealSenseCamera()
+        
+        while rclpy.ok():
+            rclpy.spin_once(camera, timeout_sec=0.1)
+            
+            # 获取并显示 RGB 和深度图像
+            try:
+                rgb_image = camera.capture_image("rgb")
+                depth_image = camera.capture_image("depth")
+
+                if rgb_image is not None:
+                    cv2.imshow("RGB Image", rgb_image)
+                if depth_image is not None:
+                    cv2.imshow("Depth Image", depth_image)
+
+                # 按下 'q' 键退出循环
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            except Exception:
+                pass  # Images not available yet
+                
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # 释放资源
+        if 'camera' in locals():
+            camera.close()
+        cv2.destroyAllWindows()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":
-    # 初始化 RealSense 相机 ROS 订阅器
-    camera = RealSenseCamera()
-
-    try:
-        while not rospy.is_shutdown():
-            # 获取并显示 RGB 和深度图像
-            rgb_image = camera.capture_image("rgb")
-            depth_image = camera.capture_image("depth")
-
-            if rgb_image is not None:
-                cv2.imshow("RGB Image", rgb_image)
-            if depth_image is not None:
-                cv2.imshow("Depth Image", depth_image)
-
-            # 按下 'q' 键退出循环
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-    finally:
-        # 释放资源
-        camera.close()
-        cv2.destroyAllWindows()
+    main()

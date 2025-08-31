@@ -1,5 +1,8 @@
 **/*.pt
 **/*.pth
+install/
+build/
+log/
 
 # Logging
 logs

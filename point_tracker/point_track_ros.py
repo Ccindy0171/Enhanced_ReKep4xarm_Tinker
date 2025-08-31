@@ -26,224 +26,232 @@ import torch.nn.functional as F
 import tree
 import pyrealsense2 as rs
 from std_msgs.msg import Int32MultiArray
-import rospy
+import rclpy
+from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
 NUM_POINTS = 8
 
-# 初始化 CvBridge
-bridge = CvBridge()
-
-def preprocess_frames(frames):
-  """Preprocess frames to model inputs.
-
-  Args:
-    frames: [num_frames, height, width, 3], [0, 255], np.uint8
-
-  Returns:
-    frames: [num_frames, height, width, 3], [-1, 1], np.float32
-  """
-  frames = frames.float()
-  frames = frames / 255 * 2 - 1
-  return frames
-
-
-def online_model_init(frames, points):
-  """Initialize query features for the query points."""
-  frames = preprocess_frames(frames)
-  feature_grids = model.get_feature_grids(frames, is_training=False)
-  features = model.get_query_features(
-      frames,
-      is_training=False,
-      query_points=points,
-      feature_grids=feature_grids,
-  )
-  return features
-
-
-def postprocess_occlusions(occlusions, expected_dist):
-  visibles = (1 - F.sigmoid(occlusions)) * (1 - F.sigmoid(expected_dist)) > 0.5
-  return visibles
-
-
-def online_model_predict(frames, features, causal_context):
-  """Compute point tracks and occlusions given frames and query points."""
-  frames = preprocess_frames(frames)
-  feature_grids = model.get_feature_grids(frames, is_training=False)
-  trajectories = model.estimate_trajectories(
-      frames.shape[-3:-1],
-      is_training=False,
-      feature_grids=feature_grids,
-      query_features=features,
-      query_points_in_video=None,
-      query_chunk_size=64,
-      causal_context=causal_context,
-      get_causal_context=True,
-  )
-  causal_context = trajectories["causal_context"]
-  del trajectories["causal_context"]
-  # Take only the predictions for the final resolution.
-  # For running on higher resolution, it's typically better to average across
-  # resolutions.
-  tracks = trajectories["tracks"][-1]
-  occlusions = trajectories["occlusion"][-1]
-  uncertainty = trajectories["expected_dist"][-1]
-  visibles = postprocess_occlusions(occlusions, uncertainty)
-  return tracks, visibles, causal_context
-
-
-print("Welcome to the TAPIR PyTorch live demo.")
-print("Please note that if the framerate is low (<~12 fps), TAPIR performance")
-print("may degrade and you may need a more powerful GPU.")
-
-if torch.cuda.is_available():
-  device = torch.device("cuda")
-else:
-  device = torch.device("cpu")
-
-# --------------------
-# Load checkpoint and initialize
-print("Creating model...")
-model = tapir_model.TAPIR(pyramid_level=1, use_casual_conv=True)
-print("Loading checkpoint...")
-model.load_state_dict(
-    torch.load("checkpoints/causal_bootstapir_checkpoint.pt")
-)
-model = model.to(device)
-model = model.eval()
-torch.set_grad_enabled(False)
-
-# 初始化ROS节点
-rospy.init_node('point_tracking_node')
-first_frame_received = False
-def callback(msg):
-    """处理接收到的图像消息并转换为 NumPy 数组，裁剪为正方形。"""
-    global rgb_frame,first_frame_received
-    # rospy.loginfo("Received image data.")
-    rgb_frame = bridge.imgmsg_to_cv2(msg, "bgr8")
-    first_frame_received = True  # 标志位设置为 True
-    # 图像裁剪为正方形
-    trunc = np.abs(rgb_frame.shape[1] - rgb_frame.shape[0]) // 2
-    if rgb_frame.shape[1] > rgb_frame.shape[0]:  # 如果宽度大于高度
-        rgb_frame = rgb_frame[:, trunc:-trunc]
-    elif rgb_frame.shape[1] < rgb_frame.shape[0]:  # 如果高度大于宽度
-        rgb_frame = rgb_frame[trunc:-trunc]
-
-# 订阅 RealSense 相机的图像主题
-rgb_sub = rospy.Subscriber("/camera/color/image_raw", Image, lambda msg: callback(msg))
-
-# ROS 发布器
-tracking_points_pub = rospy.Publisher('/current_tracking_points', Int32MultiArray, queue_size=10)
-
-
-# 存储从 ROS 接收到的图像数据
-rgb_frame = None
-pos = tuple()
-query_frame = True
-have_point = [False] * NUM_POINTS
-
-query_points = torch.zeros([NUM_POINTS, 3], dtype=torch.float32)
-query_points = query_points.to(device)
-# 等待第一帧图像到达
-while not first_frame_received:
-    rospy.loginfo("Waiting for the first frame...")
-    rospy.sleep(0.1)
-frame = torch.tensor(rgb_frame).to(device)
-
-query_features = online_model_init(
-    frames=frame[None, None], points=query_points[None, :]
-)
-
-causal_state = model.construct_initial_causal_state(
-    NUM_POINTS, len(query_features.resolutions) - 1
-)
-causal_state = tree.map_structure(lambda x: x.to(device), causal_state)
-
-prediction, visible, causal_state = online_model_predict(
-    frames=frame[None, None],
-    features=query_features,
-    causal_context=causal_state,
-)
-
-next_query_idx = 0
-
-step_counter = 0
-
-
-
-# 订阅点追踪消息
-def point_callback(msg):
-    num=0
-    global point_idx,rgb_frame
-    """处理从外部传入的追踪点信息。"""
-    global query_frame,query_features,causal_state
-    points= np.zeros((NUM_POINTS, 3), dtype=np.float32)
-    data = np.array(msg.data).reshape(-1, 3)  # 将扁平化的列表转换为二维数组
-    point_idx=[]
-    for point in data:
-        idx, x, y = point
-        point_idx.append(int(idx))
-        x = x - (1280 - 720) / 2  # 调整 x 坐标
-        pos= (y, x)
-        points[num] = np.array((0,) + pos, dtype=np.float32)
-        rospy.loginfo(f"Received point {int(idx)}: ({x}, {y})")
-        have_point[num] = True
-        num+=1
-    query_frame = True 
-
-    cv2.namedWindow("Point Tracking")
-    
-    with torch.no_grad():
-        while rgb_frame is not None:
-            frame = rgb_frame
-            numpy_frame = frame
-            if query_frame:
-                frame = torch.tensor(frame).to(device)
-                for i in range(num):
-                    query_points_i = torch.tensor(points[i]).to(device)
-                    print(f"query_points_i shape: {query_points_i.shape}")
-                    init_query_features = online_model_init(
-                        frames=frame[None, None], points=query_points_i[None, None]
-                    )
-                    query_features, causal_state = model.update_query_features(
-                        query_features=query_features,
-                        new_query_features=init_query_features,
-                        idx_to_update=np.array([int(i)]),  
-                        causal_state=causal_state,
-                    )
-            query_frame = False
-
-            if True:
-                frame = torch.tensor(frame).to(device)
-                track, visible, causal_state = online_model_predict(
-                    frames=frame[None, None],
-                    features=query_features,
-                    causal_context=causal_state,
-                )
-                track = np.round(track.cpu().numpy())
-                visible = visible.cpu().numpy()
+class PointTrackerNode(Node):
+    def __init__(self):
+        super().__init__('point_tracking_node')
+        
+        # Initialize CvBridge
+        self.bridge = CvBridge()
+        
+        # Initialize tracking variables
+        self.rgb_frame = None
+        self.first_frame_received = False
+        self.have_point = [False] * NUM_POINTS
+        self.point_idx = []
+        self.query_frame = True
+        
+        # Setup device
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
+            
+        # Load and initialize model
+        self.load_model()
+        
+        # Initialize query points and state
+        self.query_points = torch.zeros([NUM_POINTS, 3], dtype=torch.float32).to(self.device)
+        self.query_features = None
+        self.causal_state = None
+        
+        # Create publishers
+        self.tracking_points_pub = self.create_publisher(
+            Int32MultiArray, '/current_tracking_points', 10)
+        
+        # Create subscribers
+        self.rgb_sub = self.create_subscription(
+            Image, "/camera/color/image_raw", self.image_callback, 10)
+        self.points_sub = self.create_subscription(
+            Int32MultiArray, '/tracking_points', self.point_callback, 10)
+        
+        self.get_logger().info("PointTrackerNode initialized")
+        
+    def load_model(self):
+        """Load and initialize the TAPIR model"""
+        self.get_logger().info("Creating model...")
+        model = tapir_model.TAPIR(pyramid_level=1, use_casual_conv=True)
+        self.get_logger().info("Loading checkpoint...")
+        model.load_state_dict(
+            torch.load("checkpoints/causal_bootstapir_checkpoint.pt")
+        )
+        model = model.to(self.device)
+        model = model.eval()
+        torch.set_grad_enabled(False)
+        self.model = model
+        
+    def preprocess_frames(self, frames):
+        """Preprocess frames to model inputs."""
+        frames = frames.float()
+        frames = frames / 255 * 2 - 1
+        return frames
+        
+    def online_model_init(self, frames, points):
+        """Initialize query features for the query points."""
+        frames = self.preprocess_frames(frames)
+        feature_grids = self.model.get_feature_grids(frames, is_training=False)
+        features = self.model.get_query_features(
+            frames,
+            is_training=False,
+            query_points=points,
+            feature_grids=feature_grids,
+        )
+        return features
+        
+    def postprocess_occlusions(self, occlusions, expected_dist):
+        """Process occlusion predictions"""
+        visibles = (1 - F.sigmoid(occlusions)) * (1 - F.sigmoid(expected_dist)) > 0.5
+        return visibles
+        
+    def online_model_predict(self, frames, features, causal_context):
+        """Compute point tracks and occlusions given frames and query points."""
+        frames = self.preprocess_frames(frames)
+        feature_grids = self.model.get_feature_grids(frames, is_training=False)
+        trajectories = self.model.estimate_trajectories(
+            frames.shape[-3:-1],
+            is_training=False,
+            feature_grids=feature_grids,
+            query_features=features,
+            query_points_in_video=None,
+            query_chunk_size=64,
+            causal_context=causal_context,
+            get_causal_context=True,
+        )
+        causal_context = trajectories["causal_context"]
+        del trajectories["causal_context"]
+        tracks = trajectories["tracks"][-1]
+        occlusions = trajectories["occlusion"][-1]
+        uncertainty = trajectories["expected_dist"][-1]
+        visibles = self.postprocess_occlusions(occlusions, uncertainty)
+        return tracks, visibles, causal_context
+        
+    def image_callback(self, msg):
+        """Process received image messages and convert to numpy array, crop to square."""
+        # self.get_logger().debug("Received image data.")
+        self.rgb_frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        self.first_frame_received = True
+        
+        # Crop image to square
+        trunc = abs(self.rgb_frame.shape[1] - self.rgb_frame.shape[0]) // 2
+        if self.rgb_frame.shape[1] > self.rgb_frame.shape[0]:
+            self.rgb_frame = self.rgb_frame[:, trunc:-trunc]
+        elif self.rgb_frame.shape[1] < self.rgb_frame.shape[0]:
+            self.rgb_frame = self.rgb_frame[trunc:-trunc]
+            
+        # Initialize model on first frame
+        if self.query_features is None and self.first_frame_received:
+            frame = torch.tensor(self.rgb_frame).to(self.device)
+            self.query_features = self.online_model_init(
+                frames=frame[None, None], points=self.query_points[None, :]
+            )
+            self.causal_state = self.model.construct_initial_causal_state(
+                NUM_POINTS, len(self.query_features.resolutions) - 1
+            )
+            self.causal_state = tree.map_structure(lambda x: x.to(self.device), self.causal_state)
+            
+    def point_callback(self, msg):
+        """Handle tracking point information from external source."""
+        points = np.zeros((NUM_POINTS, 3), dtype=np.float32)
+        data = np.array(msg.data).reshape(-1, 3)
+        self.point_idx = []
+        num = 0
+        
+        for point in data:
+            idx, x, y = point
+            self.point_idx.append(int(idx))
+            x = x - (1280 - 720) / 2  # Adjust x coordinate
+            pos = (y, x)
+            points[num] = np.array((0,) + pos, dtype=np.float32)
+            self.get_logger().info(f"Received point {int(idx)}: ({x}, {y})")
+            self.have_point[num] = True
+            num += 1
+            
+        self.query_frame = True
+        self.track_points(num, points)
+        
+    def track_points(self, num, points):
+        """Main tracking loop"""
+        cv2.namedWindow("Point Tracking")
+        
+        with torch.no_grad():
+            while self.rgb_frame is not None and rclpy.ok():
+                frame = self.rgb_frame
+                numpy_frame = frame.copy()
                 
-                tracked_points=[]
-                for i, _ in enumerate(have_point):
-                    if visible[0, i, 0] and have_point[i]:
-                        x, y = int(track[0, i, 0, 0]), int(track[0, i, 0, 1])
-                        tracked_points.append((int(point_idx[i]), int(x + (1280 - 720) / 2), int(y)))  # 保存追踪点的索引和位置
-                        cv2.circle(numpy_frame, (x, y), 5, (255, 0, 0), -1)
+                if self.query_frame and self.query_features is not None:
+                    frame = torch.tensor(frame).to(self.device)
+                    for i in range(num):
+                        query_points_i = torch.tensor(points[i]).to(self.device)
+                        init_query_features = self.online_model_init(
+                            frames=frame[None, None], points=query_points_i[None, None]
+                        )
+                        self.query_features, self.causal_state = self.model.update_query_features(
+                            query_features=self.query_features,
+                            new_query_features=init_query_features,
+                            idx_to_update=np.array([int(i)]),  
+                            causal_state=self.causal_state,
+                        )
+                self.query_frame = False
 
-                # 将追踪的点位置转化为ROS消息并发布
-                if tracked_points:
-                    msg_to_send = Int32MultiArray()
-                    msg_to_send.data = [item for sublist in tracked_points for item in sublist]  # 扁平化数据
-                    tracking_points_pub.publish(msg_to_send)
+                if self.query_features is not None and self.causal_state is not None:
+                    frame = torch.tensor(frame).to(self.device)
+                    track, visible, self.causal_state = self.online_model_predict(
+                        frames=frame[None, None],
+                        features=self.query_features,
+                        causal_context=self.causal_state,
+                    )
+                    track = np.round(track.cpu().numpy())
+                    visible = visible.cpu().numpy()
+                    
+                    tracked_points = []
+                    for i, _ in enumerate(self.have_point):
+                        if visible[0, i, 0] and self.have_point[i] and i < len(self.point_idx):
+                            x, y = int(track[0, i, 0, 0]), int(track[0, i, 0, 1])
+                            tracked_points.append((int(self.point_idx[i]), int(x + (1280 - 720) / 2), int(y)))
+                            cv2.circle(numpy_frame, (x, y), 5, (255, 0, 0), -1)
 
-            cv2.imshow("Point Tracking", numpy_frame)
-            cv2.waitKey(1)
+                    # Convert tracked point positions to ROS message and publish
+                    if tracked_points:
+                        msg_to_send = Int32MultiArray()
+                        msg_to_send.data = [item for sublist in tracked_points for item in sublist]
+                        self.tracking_points_pub.publish(msg_to_send)
 
+                cv2.imshow("Point Tracking", numpy_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                    
+                # Process ROS callbacks
+                rclpy.spin_once(self, timeout_sec=0.001)
 
-# 订阅点追踪消息       
-rospy.Subscriber('/tracking_points', Int32MultiArray, point_callback)
-# rospy.Subscriber("/camera/color/image_raw", Image, lambda msg: callback(msg))
-# 等待触发
-rospy.loginfo("Waiting for point tracking messages...")
-rospy.spin()
+def main(args=None):
+    """Main function to run the point tracker node"""
+    print("Welcome to the TAPIR PyTorch live demo.")
+    print("Please note that if the framerate is low (<~12 fps), TAPIR performance")
+    print("may degrade and you may need a more powerful GPU.")
+    
+    rclpy.init(args=args)
+    
+    try:
+        node = PointTrackerNode()
+        
+        # Wait for first frame and tracking points
+        node.get_logger().info("Waiting for tracking point messages...")
+        rclpy.spin(node)
+        
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # Cleanup
+        cv2.destroyAllWindows()
+        if 'node' in locals():
+            node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()

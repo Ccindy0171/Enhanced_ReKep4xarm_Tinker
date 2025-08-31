@@ -2,7 +2,8 @@ import torch
 import numpy as np
 import json
 import os
-import rospy
+import rclpy
+from rclpy.node import Node
 from std_msgs.msg import Int32MultiArray,Float32MultiArray
 from geometry_msgs.msg import Point
 import argparse
@@ -34,24 +35,29 @@ import cv2
 import threading
 from skimage.draw import disk, line
 from configparser import ConfigParser
-parser = ConfigParser()
-parser.read('robot.conf')
-
-try:
-    ip = parser.get('xArm', 'ip')
-except:
-    ip = input('Please input the xArm ip address[192.168.1.237]:')
-    if not ip:
-        ip = '192.168.1.237'
         
-class Main:
+        
+class MainRekepNode(Node):
     def __init__(self, scene_file, visualize=False):
+        super().__init__('rekep_main_node')
+        
+        # Read robot configuration
+        parser = ConfigParser()
+        parser.read('robot.conf')
+        try:
+            ip = parser.get('xArm', 'ip')
+        except:
+            ip = input('Please input the xArm ip address[192.168.1.237]:')
+            if not ip:
+                ip = '192.168.1.237'
+        
         global_config = get_config(config_path="./rekep/configs/config.yaml")
         self.config = global_config['main']
         self.bounds_min = np.array(self.config['bounds_min'])
         self.bounds_max = np.array(self.config['bounds_max'])
         self.visualize = visualize
-        self.tarcking_keypoints_idx= []
+        self.tarcking_keypoints_idx = []
+        
         # set random seed
         np.random.seed(self.config['seed'])
         torch.manual_seed(self.config['seed'])
@@ -61,9 +67,9 @@ class Main:
         self.keypoint_proposer = KeypointProposer(global_config['keypoint_proposer'])
         self.constraint_generator = ConstraintGenerator(global_config['constraint_generator'])
         self.endeffector = EndEffector()
-        # # Initialize robot and camera
-        # # self.robot = KochRobot(port="/dev/ttyACM0", torque=True)
-        self.robot=XArmAPI(ip)
+        
+        # Initialize robot and camera
+        self.robot = XArmAPI(ip)
         self.robot.motion_enable(True)
         self.robot.clean_error()
         self.robot.set_mode(6)
@@ -74,21 +80,17 @@ class Main:
         self.robot.set_gripper_position(850, wait=True)
         self.robot.set_mode(0)  # 设置为位置控制模式
         self.robot.set_state(0)
-        print("xArm Connected & Gone Home!")
+        self.get_logger().info("xArm Connected & Gone Home!")
         time.sleep(1)
-         # 初始化 ROS 节点
-        rospy.init_node('coordinate_sender', anonymous=True)
-
-        
 
         self.camera = RealSenseCamera()
         # self.sam = SAM()
 
-        # # Get point to world conversion
+        # Get point to world conversion
         self.endeffector.get_point_to_world_conversion(self.camera)
 
         # initialize environment (real world)
-        self.env = ReKepEnv(global_config['env'], self.robot, self.camera,self.endeffector)
+        self.env = ReKepEnv(global_config['env'], self.robot, self.camera, self.endeffector, self)
 
         # ik_solver
         ik_solver = xArmIKSolver(self.env.robot)
@@ -105,21 +107,44 @@ class Main:
         # initialize visualizer
         self.visualizer = Visualizer(global_config['visualizer'], self.env)
         self.visualize = True
-
         # OpenAI client
         self.ai_client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
         self.terminate = False
-
         self.video_save = []
         self.subgoal_idxs = []
 
-        # ros
-       
-
-        # 创建一个发布者，发布到 /tracking_points 主题
-        self.pub = rospy.Publisher('/tracking_points', Int32MultiArray, queue_size=10)
-        self.grasp_pub = rospy.Publisher('target_point', Point, queue_size=10)
+        # ROS2 publishers
+        self.pub = self.create_publisher(Int32MultiArray, '/tracking_points', 10)
+        self.grasp_pub = self.create_publisher(Point, 'target_point', 10)
+        
+        # Storage for received grasp message
+        self.received_grasp_msg = None
+        
+        # Create subscription for grasp poses
+        self.grasp_sub = self.create_subscription(
+            Float32MultiArray, 'grasp_pose', self.grasp_callback, 10)
+        
+        self.get_logger().info("MainRekepNode initialized")
+        
+    def grasp_callback(self, msg):
+        """Callback to receive grasp pose messages"""
+        self.received_grasp_msg = msg
+        self.get_logger().info(f"Received grasp pose: {msg.data}")
+        
+    def wait_for_grasp_message(self, timeout=10.0):
+        """Wait for grasp message with timeout"""
+        self.received_grasp_msg = None
+        start_time = time.time()
+        
+        while self.received_grasp_msg is None and (time.time() - start_time) < timeout:
+            rclpy.spin_once(self, timeout_sec=0.1)
+            
+        if self.received_grasp_msg is None:
+            self.get_logger().warn("Timeout occurred while waiting for grasp pose.")
+            return None
+        else:
+            return self.received_grasp_msg
 
     def perform_task(self, instruction, rekep_program_dir=None, disturbance_seq=None):
         rgb = self.camera.capture_image("rgb")
@@ -174,7 +199,7 @@ class Main:
             msg = Int32MultiArray()
             # 展平为1维整数数组
             msg.data = [item for sublist in tracking_points for item in (sublist[:1] + sublist[1:])]
-            rospy.loginfo(f"Sending: {msg.data}")
+            self.get_logger().info(f"Sending: {msg.data}")
             self.pub.publish(msg)
 
         # ====================================
@@ -395,18 +420,18 @@ class Main:
                     target_point.y = xyz[1]/1000.0
                     target_point.z = xyz[2]/1000.0       
                     # 打印发送的坐标点
-                    rospy.loginfo(f"Sending target point: ({target_point.x}, {target_point.y}, {target_point.z})")
+                    self.get_logger().info(f"Sending target point: ({target_point.x}, {target_point.y}, {target_point.z})")
                     # 发布坐标点消息
                     self.grasp_pub.publish(target_point)
 
                     # 接收grasp消息
-                    grasp_msg = rospy.wait_for_message('grasp_pose', Float32MultiArray, timeout=10)
+                    grasp_msg = self.wait_for_grasp_message(timeout=10.0)
 
                     # 当收到消息时，打印或处理数据
                     if grasp_msg:
-                        rospy.loginfo(f"Received grasp pose: {grasp_msg.data}")
+                        self.get_logger().info(f"Received grasp pose: {grasp_msg.data}")
                     else:
-                        rospy.logwarn("Timeout occurred while waiting for grasp pose.")
+                        self.get_logger().warn("Timeout occurred while waiting for grasp pose.")
                     grasp_position = np.array(grasp_msg.data[:3]) * 1000.0 # 假设位置在列表的前3个元素
 
                     # 旋转矩阵数据：接下来的9个值（因为旋转矩阵是3x3的矩阵，总共9个元素）
@@ -414,8 +439,8 @@ class Main:
                     # 转换为四元数
                     grasp_orientation = T.mat2quat(grasp_orientation)
                     # 打印数据
-                    rospy.loginfo(f"Received grasp position: {grasp_position}")
-                    rospy.loginfo(f"Received grasp orientation:\n{grasp_orientation}")
+                    self.get_logger().info(f"Received grasp position: {grasp_position}")
+                    self.get_logger().info(f"Received grasp orientation:\n{grasp_orientation}")
                     next_subgoal = np.concatenate([grasp_position,grasp_orientation])
                     print("Next subgoal from anygrasp:", next_subgoal)
                 else:
@@ -596,9 +621,18 @@ if __name__ == "__main__":
             'rekep_program_dir': './rekep/vlm_query/2025-03-15_17-03-59_place_the_three_small_cubes_onto_the_respective_large_cubes_with_similar_color'
         },
     }
-    task = task_list['block']
-    scene_file = task['scene_file']
-    instruction = task['instruction']
-    main = Main(scene_file, visualize=args.visualize)
-    main.perform_task(instruction,
-                    rekep_program_dir=task['rekep_program_dir'] if args.use_cached_query else None)
+    
+    # Initialize ROS2
+    rclpy.init(args=None)
+    
+    try:
+        task = task_list['block']
+        scene_file = task['scene_file']
+        instruction = task['instruction']
+        main = MainRekepNode(scene_file, visualize=args.visualize)
+        main.perform_task(instruction,
+                        rekep_program_dir=task['rekep_program_dir'] if args.use_cached_query else None)
+    finally:
+        if 'main' in locals():
+            main.destroy_node()
+        rclpy.shutdown()
