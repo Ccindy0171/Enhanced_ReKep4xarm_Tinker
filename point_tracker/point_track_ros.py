@@ -20,7 +20,7 @@ import time
 import cv2
 import numpy as np
 
-from tapnet.torch1 import tapir_model
+from tapnet.torch import tapir_model
 import torch
 import torch.nn.functional as F
 import tree
@@ -30,6 +30,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
+import os
 
 NUM_POINTS = 8
 
@@ -78,8 +79,11 @@ class PointTrackerNode(Node):
         self.get_logger().info("Creating model...")
         model = tapir_model.TAPIR(pyramid_level=1, use_casual_conv=True)
         self.get_logger().info("Loading checkpoint...")
+        # get directory of this python file
+        dir_path = os.path.dirname(os.path.realpath(__file__))
         model.load_state_dict(
-            torch.load("checkpoints/causal_bootstapir_checkpoint.pt")
+            # load with absolute path or ensure the checkpoint is in the working directory
+            torch.load(os.path.join(dir_path, "checkpoints/causal_bootstapir_checkpoint.pt"))
         )
         model = model.to(self.device)
         model = model.eval()
