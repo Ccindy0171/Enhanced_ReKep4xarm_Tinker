@@ -114,8 +114,8 @@ class RealSenseCamera:
             new_gg.append(new_grasp)
         return new_gg
 
-# 初始化 RealSense 相机
-camera = RealSenseCamera()
+# # 初始化 RealSense 相机
+# camera = RealSenseCamera()
 
 # 找到最近的夹取姿态
 def find_closest_grasp(gg, target_point):

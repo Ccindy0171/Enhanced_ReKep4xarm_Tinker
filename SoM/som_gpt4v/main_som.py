@@ -30,7 +30,8 @@ from gpt4v import request_gpt4v, clear_history
 from gpt4v_azure import  request_gpt4v_multi_image_behavior_azure
 from mask_filters import get_mask_filter1
 
-import rospy
+import rclpy
+from rclpy.node import Node
 from sensor_msgs.msg import Image as ROSImage
 from cv_bridge import CvBridge
 
@@ -214,30 +215,31 @@ def combine_mask(image, mask, bbox):
 #         # 停止管道
 #         pipeline.stop()
 
-# realsense camera ros
+# realsense camera ros2
 # RealSense 相机类
-class RealSenseCamera:
+class RealSenseCamera(Node):
     def __init__(self):
+        super().__init__('realsense_camera_node')
         # 初始化 CvBridge
         self.bridge = CvBridge()        
         # 订阅图像话题
-        self.color_sub = rospy.Subscriber('/camera/color/image_raw', ROSImage, self.color_callback)       
+        self.color_sub = self.create_subscription(ROSImage, '/camera/color/image_raw', self.color_callback, 10)       
         self.color_image = None
-        rospy.loginfo("RealSense camera initialized.")
+        self.get_logger().info("RealSense camera initialized.")
 
     def color_callback(self, msg):
         try:
             # 将 ROS 图像消息转换为 Numpy 数组，并将 BGR 转换为 RGB
             self.color_image = cv2.cvtColor(self.bridge.imgmsg_to_cv2(msg, "bgr8"), cv2.COLOR_BGR2RGB)
         except Exception as e:
-            rospy.logerr(f"Failed to convert color image: {e}")
+            self.get_logger().error(f"Failed to convert color image: {e}")
 
     def depth_callback(self, msg):
         try:
             # 将ROS深度图像消息转换为Numpy数组
             self.depth_image = self.bridge.imgmsg_to_cv2(msg, "16UC1")
         except Exception as e:
-            rospy.logerr(f"Failed to convert depth image: {e}")
+            self.get_logger().error(f"Failed to convert depth image: {e}")
 
 if __name__ == '__main__':
 
@@ -247,37 +249,44 @@ if __name__ == '__main__':
     
     output_path = "data/grasp/color2.png"
     # capture_rgb_image(output_path)
-    rospy.init_node('grasp_target_objects')
+    
+    # Initialize ROS2
+    rclpy.init()
     camera = RealSenseCamera()
+    
     # save camera.color_image to output_path
     while camera.color_image is None:
-        rospy.loginfo("Waiting for camera image...")
-        rospy.sleep(0.1)
+        camera.get_logger().info("Waiting for camera image...")
+        rclpy.spin_once(camera, timeout_sec=0.1)
     # 保存图像
     cv2.imwrite(output_path, camera.color_image)
 
-    while True:
-        input("Press enter to inference ;")
-        args = OmegaConf.load(f'data/{cli_args.config}/grasp_cfg.yaml')
-        image = Image.open(args.image)
-        shutil.copyfile(args.image, f'data/{cli_args.config}/image.png')
-        output, masks = inference(image, args.granularity1)
-        Image.fromarray(output).save(f'data/{cli_args.config}/som.png')
-        respond = gpt4v_response(args.task, Image.fromarray(output), 1)
-        print(respond)
-        if respond is None:
+    try:
+        while True:
+            input("Press enter to inference ;")
+            args = OmegaConf.load(f'data/{cli_args.config}/grasp_cfg.yaml')
+            image = Image.open(args.image)
+            shutil.copyfile(args.image, f'data/{cli_args.config}/image.png')
+            output, masks = inference(image, args.granularity1)
+            Image.fromarray(output).save(f'data/{cli_args.config}/som.png')
+            respond = gpt4v_response(args.task, Image.fromarray(output), 1)
+            print(respond)
+            if respond is None:
+                clear_history()
+                continue
+            labels = extract_label(respond)
+            print(labels)
+            mask = get_mask(masks, labels)
+            # 保存所有mask图片
+            for i, m in enumerate(mask):
+                resized_mask = Image.fromarray(m['segmentation']).resize((1280, 720))
+                resized_mask.save(f'/home/young/Enhanced_ReKep4xarm/mask/mask_{i}.png')
+                print(f'mask_{i}.png saved')
             clear_history()
-            continue
-        labels = extract_label(respond)
-        print(labels)
-        mask = get_mask(masks, labels)
-        # 保存所有mask图片
-        for i, m in enumerate(mask):
-            resized_mask = Image.fromarray(m['segmentation']).resize((1280, 720))
-            resized_mask.save(f'/home/young/Enhanced_ReKep4xarm/mask/mask_{i}.png')
-            print(f'mask_{i}.png saved')
-        clear_history()
-        # Ask user if they want to continue
-        cont = input("Do you want to continue? (y/n): ")
-        if cont.lower() != 'y':
-            break
+            # Ask user if they want to continue
+            cont = input("Do you want to continue? (y/n): ")
+            if cont.lower() != 'y':
+                break
+    finally:
+        camera.destroy_node()
+        rclpy.shutdown()

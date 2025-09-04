@@ -20,7 +20,7 @@ from segment_anything import SamAutomaticMaskGenerator
 metadata = MetadataCatalog.get('coco_2017_train_panoptic')
 
 
-def inference_sam_m2m_auto1(model, image, text_size, label_mode='1', alpha=0.1, anno_mode=['Mask']):
+def inference_sam_m2m_auto(model, image, text_size, label_mode='1', alpha=0.1, anno_mode=['Mask']):
     t = []
     t.append(transforms.Resize(int(text_size), interpolation=Image.BICUBIC))
     transform1 = transforms.Compose(t)

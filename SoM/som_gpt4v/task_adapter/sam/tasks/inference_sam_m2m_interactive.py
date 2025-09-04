@@ -68,7 +68,7 @@ def sam_interactive_mask(mask_generator, points, in_points, in_labels, mask_inpu
     index = torch.stack([torch.arange(nm).cuda(), scores.argmax(dim=1)]).tolist()
     return masks[index]
 
-def inference_sam_m2m_interactive1(model, image, spatial_masks, text_size, label_mode='1', alpha=0.1, anno_mode=['Mask']):
+def inference_sam_m2m_interactive(model, image, spatial_masks, text_size, label_mode='1', alpha=0.1, anno_mode=['Mask']):
     t = []
     t.append(transforms.Resize(int(text_size), interpolation=Image.BICUBIC))
     transform1 = transforms.Compose(t)
