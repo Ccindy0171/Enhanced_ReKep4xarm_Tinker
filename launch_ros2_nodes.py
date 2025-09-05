@@ -24,7 +24,7 @@ def check_dependencies():
         return False
     
     try:
-        from tapnet.torch1 import tapir_model
+        from tapnet.torch import tapir_model
         print("✓ TAPnet available")
     except ImportError:
         print("✗ TAPnet not available")
