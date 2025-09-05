@@ -38,7 +38,7 @@ from configparser import ConfigParser
         
         
 class MainRekepNode(Node):
-    def __init__(self, scene_file, visualize=False):
+    def __init__(self, scene_file, visualize=True):
         super().__init__('rekep_main_node')
         
         # Read robot configuration
@@ -46,6 +46,7 @@ class MainRekepNode(Node):
         parser.read('robot.conf')
         try:
             ip = parser.get('xArm', 'ip')
+            print("Connecting to xArm at IP:", ip)
         except:
             ip = input('Please input the xArm ip address[192.168.1.237]:')
             if not ip:
@@ -74,7 +75,13 @@ class MainRekepNode(Node):
         self.robot.clean_error()
         self.robot.set_mode(6)
         self.robot.set_state(0)
-        self.robot.set_servo_angle(angle=[30,-40,-30,0,50,0], speed=50)
+        self.robot.set_servo_angle(angle=[0.0,
+                                    -34.0,
+                                    -1.0,
+                                    25.0,
+                                    0.0,
+                                    47.0,
+                                    -1.0], speed=50)
         self.robot.set_gripper_mode(0)
         self.robot.set_gripper_enable(True)
         self.robot.set_gripper_position(850, wait=True)
@@ -109,7 +116,7 @@ class MainRekepNode(Node):
         self.visualize = True
         # OpenAI client
         self.ai_client = OpenAI(
-            url = "https://api.openai-hk.com/v1",
+            base_url = "https://api.openai-hk.com/v1",
             api_key=os.environ['OPENAI_API_KEY']
             )
 
@@ -150,6 +157,10 @@ class MainRekepNode(Node):
             return self.received_grasp_msg
 
     def perform_task(self, instruction, rekep_program_dir=None, disturbance_seq=None):
+        # Wait for RGB image to be available
+        while self.camera.rgb_image is None or self.camera.depth_image is None:
+            self.get_logger().info("Waiting for RGB or depth image from camera...")
+            time.sleep(0.5)
         rgb = self.camera.capture_image("rgb")
         points = self.camera.pixel_to_3d_points()
         # mask = self.sam.generate(rgb)
@@ -201,7 +212,8 @@ class MainRekepNode(Node):
             # 使用ros 发布器发布
             msg = Int32MultiArray()
             # 展平为1维整数数组
-            msg.data = [item for sublist in tracking_points for item in (sublist[:1] + sublist[1:])]
+            self.get_logger().info("Preparing to send tracking points: " + str([item for sublist in tracking_points for item in (sublist[:1] + sublist[1:])]))
+            msg.data = [int(item) for sublist in tracking_points for item in (sublist[:1] + sublist[1:])]
             self.get_logger().info(f"Sending: {msg.data}")
             self.pub.publish(msg)
 
@@ -591,51 +603,75 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, default='pen', help='task to perform')
     parser.add_argument('--use_cached_query', action='store_true', help='instead of querying the VLM, use the cached query')
-    parser.add_argument('--visualize', action='store_true', help='visualize each solution before executing (NOTE: this is blocking and needs to press "ESC" to continue)')
+    parser.add_argument('--visualize', action='store_true', default=True, help='visualize each solution before executing (NOTE: this is blocking and needs to press "ESC" to continue)')
     args = parser.parse_args()
 
     task_list = {
-
-        'block':{
+        'block': {
             'scene_file': './configs/og_scene_file_red_pen.json',
-            # 'instruction': 'pick up the red block and drop it into the box',
             'instruction': 'pick up the red block and drop it into the box',
             'rekep_program_dir': './rekep/vlm_query/2025-03-16_19-54-00_pick_up_red_block_and_drop_it_into_the_box'
-            },
-
+        },
         'pen': {
             'scene_file': './configs/og_scene_file_red_pen.json',
             'instruction': 'pick up the black pen and drop it upright into the holder',
             'rekep_program_dir': './rekep/vlm_query/2025-03-16_19-54-00_pick_up_eraser_and_drop_it_into_the_masking_tape'
-            },
+        },
         'eraser': {
             'scene_file': './configs/og_scene_file_red_pen.json',
             'instruction': 'pick up eraser and drop it into the masking tape',
             'rekep_program_dir': './rekep/vlm_query/2025-03-16_19-54-00_pick_up_eraser_and_drop_it_into_the_masking_tape'
-            },
+        },
         'chess': {
             'scene_file': './configs/og_scene_file_red_pen.json',
             'instruction': 'place the white king and black king into the box. choose one keypoint for the box',
             'rekep_program_dir': './rekep/vlm_query/2025-03-16_17-16-45_place_the_white_king_and_black_king_into_the_box._choose_one_keypoint_for_the_box'
-            },
+        },
         'stack': {
             'scene_file': './configs/og_scene_file_red_pen.json',
             'instruction': 'place the three small cubes onto the respective large cubes with similar color',
             'rekep_program_dir': './rekep/vlm_query/2025-03-15_17-03-59_place_the_three_small_cubes_onto_the_respective_large_cubes_with_similar_color'
-        },
+        }
     }
-    
+
     # Initialize ROS2
     rclpy.init(args=None)
-    
+
+    from rclpy.executors import MultiThreadedExecutor
+    import threading
     try:
         task = task_list['block']
         scene_file = task['scene_file']
         instruction = task['instruction']
-        main = MainRekepNode(scene_file, visualize=args.visualize)
-        main.perform_task(instruction,
-                        rekep_program_dir=task['rekep_program_dir'] if args.use_cached_query else None)
-    finally:
-        if 'main' in locals():
-            main.destroy_node()
+        main_node = MainRekepNode(scene_file, visualize=args.visualize)
+        camera_node = main_node.camera
+
+        # Create a MultiThreadedExecutor and add both nodes
+        executor = MultiThreadedExecutor()
+        executor.add_node(main_node)
+        executor.add_node(camera_node)
+
+        # Run perform_task in a separate thread
+        def run_main_task():
+            main_node.perform_task(
+                instruction,
+                rekep_program_dir=task['rekep_program_dir'] if args.use_cached_query else None
+            )
+
+        main_task_thread = threading.Thread(target=run_main_task)
+        main_task_thread.start()
+
+        # Main loop: spin_once to allow callbacks for both nodes
+        while main_task_thread.is_alive():
+            # print("Spinning executor...")
+            executor.spin_once(timeout_sec=0.1)
+
+        # After perform_task completes, shut down nodes and executor
+        main_node.destroy_node()
+        camera_node.destroy_node()
+        executor.shutdown()
+        rclpy.shutdown()
+        main_task_thread.join()
+    except Exception as e:
+        print(e)
         rclpy.shutdown()

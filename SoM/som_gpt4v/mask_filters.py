@@ -17,7 +17,7 @@ def intersection_filter(mask1, mask2, intersection_thresh):
     intersection = np.logical_and(mask1, mask2).sum()
     return intersection / mask1.sum() > intersection_thresh
 
-def get_mask_filter(corner, area, intersection, area_thresh=100, mask2=None, intersection_thresh=0.1):
+def get_mask_filter1(corner, area, intersection, area_thresh=100, mask2=None, intersection_thresh=0.1):
     def mask_filter(output):
         mask = output['segmentation']
         if corner and not corner_filter(mask):

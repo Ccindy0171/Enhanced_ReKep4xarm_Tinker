@@ -223,7 +223,7 @@ class RealSenseCamera(Node):
         # 初始化 CvBridge
         self.bridge = CvBridge()        
         # 订阅图像话题
-        self.color_sub = self.create_subscription(ROSImage, '/camera/color/image_raw', self.color_callback, 10)       
+        self.color_sub = self.create_subscription(ROSImage, '/camera/camera/color/image_raw', self.color_callback, 10)       
         self.color_image = None
         self.get_logger().info("RealSense camera initialized.")
 
@@ -247,7 +247,7 @@ if __name__ == '__main__':
     parser.add_argument('config', type=str, help='config file name')
     cli_args = parser.parse_args()
     
-    output_path = "data/grasp/color2.png"
+    output_path = "grasp/color2.png"
     # capture_rgb_image(output_path)
     
     # Initialize ROS2
@@ -264,11 +264,11 @@ if __name__ == '__main__':
     try:
         while True:
             input("Press enter to inference ;")
-            args = OmegaConf.load(f'data/{cli_args.config}/grasp_cfg.yaml')
+            args = OmegaConf.load(f'{cli_args.config}/grasp_cfg.yaml')
             image = Image.open(args.image)
-            shutil.copyfile(args.image, f'data/{cli_args.config}/image.png')
+            shutil.copyfile(args.image, f'{cli_args.config}/image.png')
             output, masks = inference(image, args.granularity1)
-            Image.fromarray(output).save(f'data/{cli_args.config}/som.png')
+            Image.fromarray(output).save(f'{cli_args.config}/som.png')
             respond = gpt4v_response(args.task, Image.fromarray(output), 1)
             print(respond)
             if respond is None:
@@ -280,7 +280,7 @@ if __name__ == '__main__':
             # 保存所有mask图片
             for i, m in enumerate(mask):
                 resized_mask = Image.fromarray(m['segmentation']).resize((1280, 720))
-                resized_mask.save(f'/home/young/Enhanced_ReKep4xarm/mask/mask_{i}.png')
+                resized_mask.save(f'/home/cindy/Documents/R2S2R/Enhanced_ReKep4xarm_Tinker/mask/mask_{i}.png')
                 print(f'mask_{i}.png saved')
             clear_history()
             # Ask user if they want to continue

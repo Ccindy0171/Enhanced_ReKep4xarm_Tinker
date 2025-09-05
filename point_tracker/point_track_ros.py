@@ -68,7 +68,7 @@ class PointTrackerNode(Node):
         
         # Create subscribers
         self.rgb_sub = self.create_subscription(
-            Image, "/camera/color/image_raw", self.image_callback, 10)
+            Image, "/camera/camera/color/image_raw", self.image_callback, 10)
         self.points_sub = self.create_subscription(
             Int32MultiArray, '/tracking_points', self.point_callback, 10)
         
@@ -161,10 +161,16 @@ class PointTrackerNode(Node):
             
     def point_callback(self, msg):
         """Handle tracking point information from external source."""
+        self.get_logger().info(f"Received tracking point message: {msg}.")
         points = np.zeros((NUM_POINTS, 3), dtype=np.float32)
         data = np.array(msg.data).reshape(-1, 3)
+        self.get_logger().info(f"Received tracking points: {data} {msg.data}")
         self.point_idx = []
         num = 0
+
+        if len(data) > NUM_POINTS:
+            self.get_logger().warning(f"Received more than {NUM_POINTS} points, only using the first {NUM_POINTS}.")
+            data = data[:NUM_POINTS]
         
         for point in data:
             idx, x, y = point
@@ -195,10 +201,23 @@ class PointTrackerNode(Node):
                         init_query_features = self.online_model_init(
                             frames=frame[None, None], points=query_points_i[None, None]
                         )
+                        # # Ensure init_query_features is on the correct device
+                        # init_query_features = tree.map_structure(
+                        #     lambda x: x.to(self.device) if hasattr(x, 'to') else x, init_query_features
+                        #     )
+                        # # Ensure query_features is on the correct device
+                        # self.query_features = tree.map_structure(
+                        #     lambda x: x.to(self.device) if hasattr(x, 'to') else x, self.query_features
+                        #     )
+                        # # Ensure causal_state is on the correct device
+                        # self.causal_state = tree.map_structure(
+                        #     lambda x: x.to(self.device) if hasattr(x, 'to') else x, self.causal_state
+                        #     )
+                        idx_to_update = np.array([int(i)])
                         self.query_features, self.causal_state = self.model.update_query_features(
                             query_features=self.query_features,
                             new_query_features=init_query_features,
-                            idx_to_update=np.array([int(i)]),  
+                            idx_to_update=idx_to_update,
                             causal_state=self.causal_state,
                         )
                 self.query_frame = False
@@ -223,7 +242,7 @@ class PointTrackerNode(Node):
                     # Convert tracked point positions to ROS message and publish
                     if tracked_points:
                         msg_to_send = Int32MultiArray()
-                        msg_to_send.data = [item for sublist in tracked_points for item in sublist]
+                        msg_to_send.data = [int(item) for sublist in tracked_points for item in sublist]
                         self.tracking_points_pub.publish(msg_to_send)
 
                 cv2.imshow("Point Tracking", numpy_frame)

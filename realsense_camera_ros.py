@@ -16,10 +16,14 @@ class RealSenseCamera(Node):
         self.bridge = CvBridge()
 
         # 订阅 RealSense 相机的 RGB 和深度图像
-        self.rgb_sub = self.create_subscription(Image, "/camera/color/image_raw", self.rgb_callback, 10)
-        self.depth_sub = self.create_subscription(Image, "/camera/aligned_depth_to_color/image_raw", self.depth_callback, 10)  # NOTE：must sub the aligned depth image
+        self.rgb_sub = self.create_subscription(Image, "/camera/camera/color/image_raw", self.rgb_callback, 10)
+        self.depth_sub = self.create_subscription(Image, "/camera/camera/aligned_depth_to_color/image_raw", self.depth_callback, 10)  # NOTE：must sub the aligned depth image
+        self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/aligned_depth_to_color/camera_info", self.camera_info_callback, 10)
         self.rgb_image = None
         self.depth_image = None
+        self.received_camera_info = False
+        self.received_rgb_image = False
+        self.received_depth_image = False
 
         self.K = np.array([
             [908.94415283, 0, 641.31561279],
@@ -51,16 +55,26 @@ class RealSenseCamera(Node):
 
     def rgb_callback(self, msg):
         """处理接收到的 RGB 图像消息"""
+        if not self.received_rgb_image:
+            self.get_logger().info("Received RGB image")
+            self.received_rgb_image = True
         self.rgb_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
 
     def depth_callback(self, msg):
         """处理接收到的深度图像消息"""
+        if not self.received_depth_image:
+            self.get_logger().info("Received depth image")
+            self.received_depth_image = True
         self.depth_image = self.bridge.imgmsg_to_cv2(msg, "16UC1")  # 深度图像是16位无符号整数
 
     def camera_info_callback(self, msg):
         """处理相机内参"""
-        self.K = np.array(msg.K).reshape(3, 3)
-        self.D = np.array(msg.D)  # 畸变系数
+        if self.received_camera_info:
+            return  # 只处理一次
+        self.get_logger().info("Received camera info")
+        self.received_camera_info = True
+        self.K = np.array(msg.k).reshape(3, 3)
+        self.D = np.array(msg.d)  # 畸变系数
 
     def capture_image(self, image_type):
         if image_type == "rgb":

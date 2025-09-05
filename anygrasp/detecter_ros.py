@@ -41,8 +41,8 @@ class RealSenseCamera:
         self.node = node
         
         # 订阅图像话题
-        self.color_sub = node.create_subscription(ROSImage, '/camera/color/image_raw', self.color_callback, 10)
-        self.depth_sub = node.create_subscription(ROSImage, '/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
+        self.color_sub = node.create_subscription(ROSImage, '/camera/camera/color/image_raw', self.color_callback, 10)
+        self.depth_sub = node.create_subscription(ROSImage, '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
         
         self.color_image = None
         self.depth_image = None
