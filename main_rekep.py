@@ -108,7 +108,10 @@ class MainRekepNode(Node):
         self.visualizer = Visualizer(global_config['visualizer'], self.env)
         self.visualize = True
         # OpenAI client
-        self.ai_client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
+        self.ai_client = OpenAI(
+            url = "https://api.openai-hk.com/v1",
+            api_key=os.environ['OPENAI_API_KEY']
+            )
 
         self.terminate = False
         self.video_save = []
