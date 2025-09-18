@@ -225,12 +225,23 @@ class RealSenseCamera(Node):
         # 订阅图像话题
         self.color_sub = self.create_subscription(ROSImage, '/camera/camera/color/image_raw', self.color_callback, 10)       
         self.color_image = None
+        # 创建显示窗口
+        cv2.namedWindow("Color Image", cv2.WINDOW_AUTOSIZE)
         self.get_logger().info("RealSense camera initialized.")
 
     def color_callback(self, msg):
         try:
-            # 将 ROS 图像消息转换为 Numpy 数组，并将 BGR 转换为 RGB
-            self.color_image = cv2.cvtColor(self.bridge.imgmsg_to_cv2(msg, "bgr8"), cv2.COLOR_BGR2RGB)
+            # 将 ROS 图像消息转换为 Numpy 数组
+            color_image_bgr = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            # 存储 RGB 格式用于处理
+            self.color_image = cv2.cvtColor(color_image_bgr, cv2.COLOR_BGR2RGB)
+            
+            # Debug: 检查图像数据
+            self.get_logger().info(f"Received image: {color_image_bgr.shape}, min: {color_image_bgr.min()}, max: {color_image_bgr.max()}")
+            
+            # 显示 BGR 格式的图像
+            cv2.imshow("Color Image", color_image_bgr)
+            cv2.waitKey(1)
         except Exception as e:
             self.get_logger().error(f"Failed to convert color image: {e}")
 
@@ -258,8 +269,9 @@ if __name__ == '__main__':
     while camera.color_image is None:
         camera.get_logger().info("Waiting for camera image...")
         rclpy.spin_once(camera, timeout_sec=0.1)
-    # 保存图像
-    cv2.imwrite(output_path, camera.color_image)
+    # 保存图像 - 将 RGB 转换回 BGR 用于保存
+    color_image_bgr_to_save = cv2.cvtColor(camera.color_image, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(output_path, color_image_bgr_to_save)
 
     try:
         while True:
@@ -269,6 +281,7 @@ if __name__ == '__main__':
             shutil.copyfile(args.image, f'{cli_args.config}/image.png')
             output, masks = inference(image, args.granularity1)
             Image.fromarray(output).save(f'{cli_args.config}/som.png')
+            _ = input("Press enter to ask GPT-4V ;")
             respond = gpt4v_response(args.task, Image.fromarray(output), 1)
             print(respond)
             if respond is None:

@@ -51,12 +51,11 @@ class PointTrackerNode(Node):
         self.query_frame = True
         self.next_query_idx = 0
         
-        # # Setup device
-        # if torch.cuda.is_available():
-        #     self.device = torch.device("cuda")
-        # else:
-        #     self.device = torch.device("cpu")
-        self.device = torch.device('cpu')
+        # Setup device
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
             
         # Load and initialize model
         self.load_model()
@@ -95,29 +94,32 @@ class PointTrackerNode(Node):
         self.destroy_timer(self.debug_timer)
         
     def load_model(self):
-        """Load and initialize the TAPIR model"""
+        """Load and initialize the TAPIR model following the live_demo.py pattern"""
         self.get_logger().info("Creating model...")
-        model = tapir_model.TAPIR(pyramid_level=1, use_casual_conv=True)
-        self.get_logger().info("Loading checkpoint...")
-        # get directory of this python file
+        
+        # Load checkpoint similar to JAX version
         dir_path = os.path.dirname(os.path.realpath(__file__))
-        model.load_state_dict(
-            # load with absolute path or ensure the checkpoint is in the working directory
-            torch.load(os.path.join(dir_path, "checkpoints/causal_bootstapir_checkpoint.pt"))
-        )
-        model = model.to(self.device)
-        model = model.eval()
+        checkpoint_path = os.path.join(dir_path, "checkpoints/causal_bootstapir_checkpoint.pt")
+        
+        # Create model and load state dict
+        self.model = tapir_model.TAPIR(pyramid_level=1, use_casual_conv=True)
+        self.model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+        self.model = self.model.to(self.device)
+        self.model.eval()
+        
+        # Disable gradients for inference
         torch.set_grad_enabled(False)
-        self.model = model
+        
+        self.get_logger().info("Model loaded successfully")
         
     def preprocess_frames(self, frames):
-        """Preprocess frames to model inputs."""
-        frames = frames.float()
-        frames = frames / 255 * 2 - 1
+        """Preprocess frames to model inputs - following live_demo.py pattern"""
+        # Convert to float and normalize to [-1, 1] range
+        frames = frames.float() / 255.0 * 2.0 - 1.0
         return frames
         
     def online_model_init(self, frames, points):
-        """Initialize query features for the query points."""
+        """Initialize query features for the query points - following live_demo.py pattern"""
         frames = self.preprocess_frames(frames)
         feature_grids = self.model.get_feature_grids(frames, is_training=False)
         features = self.model.get_query_features(
@@ -129,12 +131,12 @@ class PointTrackerNode(Node):
         return features
         
     def postprocess_occlusions(self, occlusions, expected_dist):
-        """Process occlusion predictions"""
+        """Process occlusion predictions - following live_demo.py pattern"""
         visibles = (1 - F.sigmoid(occlusions)) * (1 - F.sigmoid(expected_dist)) > 0.5
         return visibles
         
     def online_model_predict(self, frames, features, causal_context):
-        """Compute point tracks and occlusions given frames and query points."""
+        """Compute point tracks and occlusions - following live_demo.py pattern"""
         frames = self.preprocess_frames(frames)
         feature_grids = self.model.get_feature_grids(frames, is_training=False)
         trajectories = self.model.estimate_trajectories(
@@ -149,126 +151,135 @@ class PointTrackerNode(Node):
         )
         causal_context = trajectories["causal_context"]
         del trajectories["causal_context"]
+        
+        # Extract results similar to JAX version
         tracks = trajectories["tracks"][-1]
         occlusions = trajectories["occlusion"][-1]
-        uncertainty = trajectories["expected_dist"][-1]
-        visibles = self.postprocess_occlusions(occlusions, uncertainty)
+        expected_dist = trajectories["expected_dist"][-1]
+        visibles = self.postprocess_occlusions(occlusions, expected_dist)
+        
         return tracks, visibles, causal_context
         
     def image_callback(self, msg):
         """Process received image messages and convert to numpy array, crop to square."""
-        # self.get_logger().debug("Received image data.")
         self.rgb_frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         
-        # Crop image to square
+        # Crop image to square - following live_demo.py pattern
         trunc = abs(self.rgb_frame.shape[1] - self.rgb_frame.shape[0]) // 2
         if self.rgb_frame.shape[1] > self.rgb_frame.shape[0]:
             self.rgb_frame = self.rgb_frame[:, trunc:-trunc]
         elif self.rgb_frame.shape[1] < self.rgb_frame.shape[0]:
             self.rgb_frame = self.rgb_frame[trunc:-trunc]
             
-        # Initialize model on first frame - DO NOT initialize query features here
-        # Just prepare for future initialization when we get tracking points
-        if self.query_features is None and not self.first_frame_received:
-            # Only initialize causal state structure, not query features
+        # Set flag that first frame is received
+        if not self.first_frame_received:
+            self.first_frame_received = True
             self.get_logger().info("First frame received, ready for tracking points")
-            self.first_frame_received = True  # Only need to log once
+            
+            # Initialize model similar to JAX demo compilation step
+            self.compile_model()
+            
+    def compile_model(self):
+        """Compile model similar to JAX demo - run once for optimization"""
+        if self.rgb_frame is not None:
+            self.get_logger().info("Compiling PyTorch model (this may take a while...)")
+            
+            frame_tensor = torch.tensor(self.rgb_frame, dtype=torch.float32).to(self.device)
+            dummy_points = torch.zeros([NUM_POINTS, 3], dtype=torch.float32).to(self.device)
+            
+            # Run once to warm up
+            with torch.no_grad():
+                _ = self.online_model_init(
+                    frames=frame_tensor[None, None], 
+                    points=dummy_points[None, 0:1]
+                )
+                
+                # Initialize full query features and causal state
+                self.query_features = self.online_model_init(
+                    frames=frame_tensor[None, None], 
+                    points=dummy_points[None, :]
+                )
+                
+                self.causal_state = self.model.construct_initial_causal_state(
+                    NUM_POINTS, len(self.query_features.resolutions) - 1
+                )
+                
+                # Run a dummy prediction to warm up
+                _, _, _ = self.online_model_predict(
+                    frames=frame_tensor[None, None],
+                    features=self.query_features,
+                    causal_context=self.causal_state,
+                )
+                
+            self.get_logger().info("Model compilation completed")
             
     def point_callback(self, msg):
         """Handle tracking point information from external source."""
         self.get_logger().info(f"Received tracking point message: {msg}.")
         data = np.array(msg.data).reshape(-1, 3)
         self.get_logger().info(f"Received tracking points: {data}")
-        self.point_idx = []
         
+        if not self.first_frame_received:
+            self.get_logger().warning("No frame received yet, cannot initialize tracking")
+            return
+            
         if len(data) > NUM_POINTS:
             self.get_logger().warning(f"Received more than {NUM_POINTS} points, only using the first {NUM_POINTS}.")
             data = data[:NUM_POINTS]
         
-        # Process each point and add to tracking
+        # Process each point similar to JAX demo mouse clicks
         for i, point in enumerate(data):
             idx, x, y = point
-            self.point_idx.append(int(idx))
             # Adjust x coordinate for cropping
             x_adjusted = x - (1280 - 720) / 2
             self.get_logger().info(f"Received point {int(idx)}: ({x_adjusted}, {y})")
             
-            # Initialize tracking for this point
-            self.add_tracking_point(int(idx), x_adjusted, y)
+            # Add point following JAX demo pattern
+            self.add_point(int(idx), x_adjusted, y)
             
-    def add_tracking_point(self, point_idx, x, y):
-        """Add a new point to track"""
-        if self.rgb_frame is None:
-            self.get_logger().warning("No frame available for tracking point initialization")
-            return
-            
-        # Find available slot
-        available_slot = None
-        for i in range(NUM_POINTS):
-            if not self.have_point[i]:
-                available_slot = i
-                break
-                
-        if available_slot is None:
-            self.get_logger().warning("No available slots for new tracking point")
-            return
-            
-        # Initialize query features if this is the first point
-        if self.query_features is None:
-            frame_tensor = torch.tensor(self.rgb_frame).to(self.device)
-            # Initialize with dummy points for all slots
-            dummy_points = torch.zeros([NUM_POINTS, 3], dtype=torch.float32).to(self.device)
-            self.query_features = self.online_model_init(
-                frames=frame_tensor[None, None], 
-                points=dummy_points[None, :]
-            )
-            self.causal_state = self.model.construct_initial_causal_state(
-                NUM_POINTS, len(self.query_features.resolutions) - 1
-            )
-            # Move causal_state to the correct device
-            self.causal_state = tree.map_structure(
-                lambda x: x.to(self.device) if hasattr(x, 'to') else x, self.causal_state
-            )
-            self.get_logger().info("Initialized query features and causal state")
-        
-        # Now update the specific point
-        frame_tensor = torch.tensor(self.rgb_frame).to(self.device)
-        query_point = torch.tensor([0, y, x], dtype=torch.float32).to(self.device)
-        
-        init_query_features = self.online_model_init(
-            frames=frame_tensor[None, None], 
-            points=query_point[None, None]
-        )
-        
-        # Ensure all structures are on the correct device before update
-        init_query_features = tree.map_structure(
-            lambda x: x.to(self.device) if hasattr(x, 'to') else x, init_query_features
-        )
-        self.query_features = tree.map_structure(
-            lambda x: x.to(self.device) if hasattr(x, 'to') else x, self.query_features
-        )
-        self.causal_state = tree.map_structure(
-            lambda x: x.to(self.device) if hasattr(x, 'to') else x, self.causal_state
-        )
-        
-        # Update query features for this point
-        self.query_features, self.causal_state = self.model.update_query_features(
-            query_features=self.query_features,
-            new_query_features=init_query_features,
-            idx_to_update=np.array([available_slot]),  # numpy array as expected
-            causal_state=self.causal_state,
-        )
-        
-        self.have_point[available_slot] = True
-        self.get_logger().info(f"Added tracking point {point_idx} at slot {available_slot}")
-        
-        # Start tracking loop if not already running
+        # Start tracking loop
         if not hasattr(self, '_tracking_active'):
             self._tracking_active = True
             self.start_tracking()
             
+    def add_point(self, point_idx, x, y):
+        """Add a new point to track - following JAX demo pattern"""
+        if self.rgb_frame is None or self.query_features is None:
+            self.get_logger().warning("Model not ready for tracking")
+            return
+            
+        # Find next available slot (following JAX demo's next_query_idx pattern)
+        available_slot = self.next_query_idx
+        
+        # Convert position to query point format (t, y, x) like JAX demo
+        pos = (y, x)
+        query_point = torch.tensor([0] + list(pos), dtype=torch.float32).to(self.device)
+        
+        # Initialize query features for this point
+        frame_tensor = torch.tensor(self.rgb_frame, dtype=torch.float32).to(self.device)
+        
+        with torch.no_grad():
+            init_query_features = self.online_model_init(
+                frames=frame_tensor[None, None],
+                points=query_point[None, None],
+            )
+            
+            # Update query features following JAX demo pattern
+            self.query_features, self.causal_state = self.model.update_query_features(
+                query_features=self.query_features,
+                new_query_features=init_query_features,
+                idx_to_update=np.array([available_slot]),  # numpy array as in JAX demo
+                causal_state=self.causal_state,
+            )
+            
+        self.have_point[available_slot] = True
+        self.point_idx.append(point_idx)
+        self.next_query_idx = (self.next_query_idx + 1) % NUM_POINTS
+        
+        self.get_logger().info(f"Added tracking point {point_idx} at slot {available_slot}")
+            
     def start_tracking(self):
-        """Start the main tracking loop"""
+        """Start the main tracking loop - following JAX demo pattern"""
         self.get_logger().info("Starting tracking loop")
         cv2.namedWindow("Point Tracking")
         
@@ -280,24 +291,36 @@ class PointTrackerNode(Node):
                     
                 frame = self.rgb_frame.copy()
                 
-                if self.query_features is not None and self.causal_state is not None:
-                    frame_tensor = torch.tensor(self.rgb_frame).to(self.device)
-                    track, visible, self.causal_state = self.online_model_predict(
+                # Run prediction if we have active points (following JAX demo pattern)
+                if any(self.have_point) and self.query_features is not None and self.causal_state is not None:
+                    frame_tensor = torch.tensor(self.rgb_frame, dtype=torch.float32).to(self.device)
+                    
+                    tracks, visibles, self.causal_state = self.online_model_predict(
                         frames=frame_tensor[None, None],
                         features=self.query_features,
                         causal_context=self.causal_state,
                     )
-                    track = track.cpu().numpy()
-                    visible = visible.cpu().numpy()
+                    
+                    # Convert to numpy for processing
+                    tracks = tracks.cpu().numpy()
+                    visibles = visibles.cpu().numpy()
                     
                     tracked_points = []
+                    
+                    # Draw tracking results following JAX demo pattern
                     for i in range(NUM_POINTS):
-                        if self.have_point[i] and visible[0, i, 0]:
-                            x, y = int(track[0, i, 0, 0]), int(track[0, i, 0, 1])
-                            # Adjust x coordinate back for publishing
-                            x_original = int(x + (1280 - 720) / 2)
-                            tracked_points.append((int(self.point_idx[i] if i < len(self.point_idx) else i), x_original, int(y)))
-                            cv2.circle(frame, (x, y), 5, (255, 0, 0), -1)
+                        if self.have_point[i] and visibles[0, i, 0]:
+                            # Get track coordinates
+                            track_x = int(tracks[0, i, 0, 0])
+                            track_y = int(tracks[0, i, 0, 1])
+                            
+                            # Draw circle
+                            cv2.circle(frame, (track_x, track_y), 5, (255, 0, 0), -1)
+                            
+                            # Adjust coordinates back for publishing
+                            x_original = int(track_x + (1280 - 720) / 2)
+                            point_id = self.point_idx[i] if i < len(self.point_idx) else i
+                            tracked_points.append((int(point_id), x_original, int(track_y)))
 
                     # Publish tracked points
                     if tracked_points:
@@ -305,7 +328,8 @@ class PointTrackerNode(Node):
                         msg_to_send.data = [int(item) for sublist in tracked_points for item in sublist]
                         self.tracking_points_pub.publish(msg_to_send)
 
-                cv2.imshow("Point Tracking", frame)
+                # Display frame (flipped horizontally like JAX demo)
+                cv2.imshow("Point Tracking", frame[:, ::-1])
                 key = cv2.waitKey(1)
                 if key == 27:  # exit on ESC
                     break

@@ -190,6 +190,10 @@ class MainRekepNode(Node):
         # ====================================
         if rekep_program_dir is None:
             keypoints,pixels, projected_img = self.keypoint_proposer.get_keypoints(rgb, points, mask)
+            # convert pixels to world coordinate and log
+            for pixel in pixels:
+                world_coord = self.camera.get_world_coordinates(pixel[1], pixel[0])
+                self.get_logger().info(f"Pixel {pixel} -> World Coord {world_coord}")
             print(f'{bcolors.HEADER}Got {len(keypoints)} proposed keypoints{bcolors.ENDC}')
             if self.visualize:
                 self.visualizer.show_img(projected_img)
@@ -412,6 +416,7 @@ class MainRekepNode(Node):
         self._update_stage(1)
         while True:
             scene_keypoints = self.env.get_keypoint_positions()
+            self.get_logger().info(f"Current keypoints: {scene_keypoints}")
             self.keypoints = np.concatenate([[self.env.get_ee_pos()], scene_keypoints], axis=0)  # first keypoint is always the ee
             self.curr_ee_pose = self.env.get_ee_pose()
             print("Current ee pose:", self.curr_ee_pose)
@@ -428,7 +433,8 @@ class MainRekepNode(Node):
                 next_subgoal = self._get_next_subgoal(from_scratch=self.first_iter)
                 print("Next subgoal1:", next_subgoal)
             else:  
-                xyz = self.keypoints[self.subgoal_idxs[self.stage - 1]]   
+                xyz = self.keypoints[self.subgoal_idxs[self.stage - 1]]
+                self.get_logger().info(f"Keypoint {self.subgoal_idxs[self.stage - 1]} position: {xyz}")   
                 if self.is_grasp_stage:    
                     target_point = Point()
                     target_point.x = xyz[0]/1000.0
@@ -445,6 +451,7 @@ class MainRekepNode(Node):
                     # 当收到消息时，打印或处理数据
                     if grasp_msg:
                         self.get_logger().info(f"Received grasp pose: {grasp_msg.data}")
+                        _ = input("Press Enter to continue...")
                     else:
                         self.get_logger().warn("Timeout occurred while waiting for grasp pose.")
                     grasp_position = np.array(grasp_msg.data[:3]) * 1000.0 # 假设位置在列表的前3个元素
@@ -607,6 +614,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     task_list = {
+        'battery': {
+            'scene_file': './configs/og_scene_file_red_pen.json',
+            'instruction': 'give me a tennis ball',
+            'rekep_program_dir': './rekep/vlm_query/2025-03-16_19-54-00_pick_up_plastic_bottle_and_set_it_next_to_the_water_bottle'
+        },
         'block': {
             'scene_file': './configs/og_scene_file_red_pen.json',
             'instruction': 'pick up the red block and drop it into the box',
@@ -640,7 +652,7 @@ if __name__ == "__main__":
     from rclpy.executors import MultiThreadedExecutor
     import threading
     try:
-        task = task_list['block']
+        task = task_list['battery']
         scene_file = task['scene_file']
         instruction = task['instruction']
         main_node = MainRekepNode(scene_file, visualize=args.visualize)

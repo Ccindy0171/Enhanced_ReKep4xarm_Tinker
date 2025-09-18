@@ -49,6 +49,7 @@ class EndEffector:
 
         x_star = x_star / x_star[2]
         point = [int(np.rint(x_star[1])[0]), int(np.rint(x_star[0])[0])]
+        # print(f"[EndEffector] Converted world coord {world_coord} to pixel point {point}")
         return point
 
     def return_estimated_ee(self, cam_node, curr_position):
@@ -79,6 +80,8 @@ class EndEffector:
         # Retrieve the closest pixel point and its corresponding world point
         closest_pixel_point = tuple(pixel_points[closest_index])  # Convert back to tuple
         corresponding_world_point = self.point_to_world[closest_pixel_point]
+
+        print(f"[EndEffector] Closest pixel point to {ref_point} is {closest_pixel_point} with world coord {corresponding_world_point}")
 
         return corresponding_world_point
 

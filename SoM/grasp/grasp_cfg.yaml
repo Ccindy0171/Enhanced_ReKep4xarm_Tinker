@@ -1,6 +1,6 @@
-image: data/grasp/color2.png
+image: grasp/color2.png
 
-task: "pick up the red block and drop it into the box'" 
+task: "give me a tennis ball" 
 granularity1: 1.9
 granularity2: 1.8
 output: grasp/mask.npy

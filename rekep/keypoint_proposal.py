@@ -202,7 +202,6 @@ class KeypointProposer:
                 member_points = feature_points[member_idx]
                 member_pixels = feature_pixels[member_idx]
 
-
                 # pdb.set_trace()
                 member_features = features_pca[member_idx]
                 cluster_center = cluster_centers[cluster_id][:3]
@@ -214,6 +213,7 @@ class KeypointProposer:
                 candidate_keypoints.append(member_points[closest_idx])
                 candidate_pixels.append(member_pixels[closest_idx])
                 candidate_rigid_group_ids.append(rigid_group_id)
+                print(f"[KeypointProposer] Rigid group {rigid_group_id}, cluster {cluster_id}, candidate keypoint (world coord): {member_points[closest_idx]}, pixel coord: {member_pixels[closest_idx]}")
 
         candidate_keypoints = np.array(candidate_keypoints)
         candidate_pixels = np.array(candidate_pixels)

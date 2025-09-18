@@ -3,6 +3,7 @@
 install/
 build/
 log/
+**/vlm_query/
 
 # Logging
 logs

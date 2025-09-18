@@ -110,6 +110,7 @@ class ReKepEnv:
                 obj = idx_obj_map[i]
 
             img_coord = self.endeffector.convert_world_to_point(camera, k)
+            print(f"Keypoint {i}: Object: {obj}, World Coord: {k}, Image Coord: {img_coord}")
             self._keypoint_registry[i] = {"object": obj, 
                                           "keypoint": k,
                                           "img_coord": img_coord,
@@ -137,7 +138,7 @@ class ReKepEnv:
             while not tracking_points or not point_idx:
                 if self.node:
                     self.node.get_logger().info("Waiting for tracking points to be updated...")
-                rclpy.spin_once(self.node, timeout_sec=0.1)
+                rclpy.spin_once(self.node, timeout_sec=0.5)
 
         
         print("tracking_points", tracking_points)
@@ -168,6 +169,7 @@ class ReKepEnv:
                 obj['img_coord']= [0, 0]
                 obj['keypoint']= self.keypoints[idx]  
                 keypoint_positions.append(obj["keypoint"])
+                self.node.get_logger().info(f"Keypoint {idx} not in tracked points, using previous keypoint: {obj['keypoint']}")
                 continue
             # debug
             print("idx", idx)
@@ -179,9 +181,20 @@ class ReKepEnv:
 
             print("tracking_points[idx][1:3]", matching_point[1:3])
             obj['img_coord'] = matching_point[1:3]
+            # visualize point on camera, display it directly
+            # import cv2
+            # rgb_image = self.camera.capture_image("rgb")
+            # cv2.circle(rgb_image, (obj['img_coord'][0], obj['img_coord'][1]), 5, (0, 255, 0), -1)
+            # cv2.imshow("Keypoint Tracking", rgb_image)
+            # cv2.waitKey(1)
+
+            print("converting to world coordinates...")
+            self.node.get_logger().info(f"Converting to world coordinates for image coord: {obj['img_coord']}")
             obj['keypoint']= self.camera.get_world_coordinates(obj['img_coord'][0], obj['img_coord'][1])
+            self.node.get_logger().info(f"Converted world coordinates: {obj['keypoint']}")
             if obj['keypoint'][0] == 0 and obj['keypoint'][1] == 0 and obj['keypoint'][2] == 0:
                 obj['keypoint']= self.keypoints[idx]  
+                self.node.get_logger().warning(f"Using previous keypoint due to conversion failure: {obj['keypoint']}")
             else:     
                 self.keypoints[idx] = obj['keypoint']
             # NOTE: keypoint positions may be inaccurate due to noisy camera
@@ -192,7 +205,6 @@ class ReKepEnv:
                 self.keypoints[idx] = obj['keypoint']
         POINTS_CALLBACK=False
         return np.array(keypoint_positions)
-
 
 
     def get_object_by_keypoint(self, keypoint_idx):

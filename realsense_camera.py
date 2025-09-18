@@ -38,6 +38,7 @@ class RealSenseCamera:
                 self.t = transform_matrix[:3, 3:4]*1000.0  # 保持列向量形式  转换为mm
                 self.transform_matrix = transform_matrix  # 保存完整矩阵以供需要时使用
                 self.loaded_extrinsics = True
+                self.get_logger().info(f"Loaded extrinsics:\nRotation:\n{self.R}\nTranslation:\n{self.t.flatten()}")
             else:
                 raise ValueError("Expected a 4x4 transformation matrix")
         except Exception as e:

@@ -6,7 +6,6 @@ import numpy as np
 import cv2
 from scipy.ndimage import label
 from PIL import Image as PILImage
-import time
 
 
 class RealSenseCamera(Node):
@@ -27,8 +26,8 @@ class RealSenseCamera(Node):
         self.received_depth_image = False
 
         self.K = np.array([
-            [910.11865234375, 0, 648.4154052734375],
-            [0, 910.267333984375, 353.2521667480469],
+            [908.94415283, 0, 641.31561279],
+            [0, 908.80529785, 370.88174438],
             [0, 0, 1]
         ])
         
@@ -54,7 +53,6 @@ class RealSenseCamera(Node):
             self.loaded_extrinsics = False
             
         self.get_logger().info("RealSenseCamera initialized")
-        self.get_logger().info(f"Using extrinsics:\nRotation:\n{self.R}\nTranslation:\n{self.t.flatten()}")
 
     def rgb_callback(self, msg):
         """处理接收到的 RGB 图像消息"""
@@ -67,8 +65,11 @@ class RealSenseCamera(Node):
         """处理接收到的深度图像消息"""
         if not self.received_depth_image:
             self.get_logger().info("Received depth image")
+            self.get_logger().info(f"Depth image encoding: {msg.encoding}")
+            self.get_logger().info(f"Depth image dimensions: {msg.width}x{msg.height}")
             self.received_depth_image = True
-        self.depth_image = self.bridge.imgmsg_to_cv2(msg, "16UC1")  # 深度图像是16位无符号整数
+        # Use "passthrough" to preserve original data format
+        self.depth_image = self.bridge.imgmsg_to_cv2(msg, "passthrough")
 
     def camera_info_callback(self, msg):
         """处理相机内参"""
@@ -78,8 +79,6 @@ class RealSenseCamera(Node):
         self.received_camera_info = True
         self.K = np.array(msg.k).reshape(3, 3)
         self.D = np.array(msg.d)  # 畸变系数
-        self.get_logger().info(f"Camera intrinsic matrix K:\n{self.K}")
-        self.get_logger().info(f"Camera distortion coefficients D:\n{self.D}")
 
     def capture_image(self, image_type):
         if image_type == "rgb":
@@ -156,38 +155,66 @@ class RealSenseCamera(Node):
 
     def pixel_to_3d_points(self):
         depth_pc = self.capture_points()
-        K_inv = np.linalg.inv(self.K)
+        
+        # Convert depth from millimeters to meters
+        depth_pc = depth_pc.astype(float) / 1000.0
+        
+        # Get camera intrinsic parameters
+        fx, fy, cx, cy = self.K[0, 0], self.K[1, 1], self.K[0, 2], self.K[1, 2]
+        
+        # Get array dimensions
+        H, W = depth_pc.shape
+        
+        # Create coordinate grids
+        points_x = np.repeat(np.expand_dims(np.arange(0, W), axis=0), H, axis=0)  # x coordinates (columns)
+        points_y = np.repeat(np.expand_dims(np.arange(0, H), axis=1), W, axis=1)  # y coordinates (rows)
+        
+        # Apply camera projection to get 3D coordinates in camera frame
+        camera_x = (points_x - cx) * depth_pc / fx
+        camera_y = (points_y - cy) * depth_pc / fy
+        camera_z = depth_pc
+        
+        # Stack into point cloud
+        pc_camera = np.stack([camera_x, camera_y, camera_z], axis=2)
+        
+        # Convert to world coordinates using extrinsic parameters
         R_inv = np.linalg.inv(self.R)
-
-        # Get array of valid pixel locations
-        shape = depth_pc.shape
-        xv, yv = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
-        nan_mask = ~np.isnan(depth_pc)
-        xv, yv = xv[nan_mask], yv[nan_mask]
-        pc_all = np.vstack((xv, yv, np.ones(xv.shape)))
-
-        # Convert pixel to world coordinates
-        s = depth_pc[yv, xv]
-        pc_camera = s * (K_inv @ pc_all)
-        pw_final = (R_inv @ (pc_camera - self.t)).T
-        pw_final = pw_final.reshape(shape[0], shape[1], 3)
-
-        self.get_logger().info(f"Converted pixel to 3D points, shape: {pw_final.shape}")
-
-        # display using o3d
-        import open3d as o3d
-        pc = o3d.geometry.PointCloud()
-        pc.points = o3d.utility.Vector3dVector(pw_final.reshape(-1, 3))
-        # draw the axis at the origin as well
-        # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=100.0, origin=[0, 0, 0])
-        # pc += axis
-        o3d.visualization.draw_geometries([pc])
+        
+        # Reshape for matrix operations
+        pc_camera_reshaped = pc_camera.reshape(-1, 3).T  # Shape: (3, N)
+        
+        # Transform to world coordinates: R_inv @ (pc_camera - t)
+        pw_final_reshaped = R_inv @ (pc_camera_reshaped - self.t)
+        
+        # Reshape back to original image dimensions
+        pw_final = pw_final_reshaped.T.reshape(H, W, 3)
 
         return pw_final
     
     def get_average_depth(self, x, y):
         """根据周围9个点计算深度值的平均值，并去掉无效点。"""
         depth_image = self.capture_points()
+
+        # save depth image for debug
+        cv2.imwrite("debug_depth.png", depth_image)
+
+        
+        if depth_image is None:
+            print(f"Depth image is None")
+            return None
+            
+        print(f"Depth image shape: {depth_image.shape}, dtype: {depth_image.dtype}")
+        print(f"Depth image range: min={np.min(depth_image)}, max={np.max(depth_image)}")
+        print(f"Checking pixel ({x}, {y}) in image of size {depth_image.shape}")
+        
+        # Check if the pixel is within bounds
+        if not (0 <= x < depth_image.shape[1] and 0 <= y < depth_image.shape[0]):
+            print(f"Pixel ({x}, {y}) is outside image bounds {depth_image.shape}")
+            return None
+        
+        # Check the center pixel value first
+        center_depth = depth_image[y, x]
+        print(f"Center pixel depth value: {center_depth}")
         
         # 定义 3x3 邻域
         neighborhood = [
@@ -195,35 +222,54 @@ class RealSenseCamera(Node):
         ]
         
         valid_depths = []
-        print(f"Depth image shape: {depth_image.shape}")
-        
-        # save depth image for debug
-        cv2.imwrite("realsense_log/debug_depth.png", depth_image.astype(np.uint16))
+        debug_info = []
         
         # 遍历 3x3 邻域并收集有效的深度值
         for dx, dy in neighborhood:
             nx, ny = x + dx, y + dy
-            # print(nx, ny)
+            
             # 确保坐标在图像范围内
             if 0 <= nx < depth_image.shape[1] and 0 <= ny < depth_image.shape[0]:
-                # print("in range")
                 depth_value = depth_image[ny, nx]
-                # print(depth_value)
-                # 检查深度值是否有效
-                if depth_value > 0 and not np.isnan(depth_value):
+                debug_info.append(f"({nx},{ny}): {depth_value}")
+                
+                # 检查深度值是否有效 (参考代码的验证逻辑)
+                # RealSense深度值在毫米单位，有效范围通常是几毫米到几米
+                if depth_value > 0 and not np.isnan(depth_value) and depth_value < 10000:  # < 10m in mm
                     valid_depths.append(depth_value)
-            # print("one point done")
-        print(f"Gotten depth values")
-        print(valid_depths)
+        
+        print(f"Neighborhood depth values: {debug_info}")
+        print(f"Valid depths found: {valid_depths}")
         
         # 如果存在有效的深度值，则计算其平均值
         if valid_depths:
-            print(f"Valid depth values in the neighborhood of ({x}, {y})")
-            return np.mean(valid_depths)  # 返回平均深度值，形状是 ()
+            avg_depth = np.mean(valid_depths)
+            print(f"Average depth: {avg_depth}")
+            return avg_depth
         else:
-            # raise ValueError(f"Invalid depth values in the neighborhood of ({x}, {y})")
-            print(f"Invalid depth value at ({x}, {y})")
-        print("finished")
+            # 如果没有有效深度值，检查是否该区域普遍没有深度数据
+            print(f"No valid depth values found in the neighborhood of ({x}, {y})")
+            
+            # 提供一些调试信息
+            region_x1 = max(0, x - 10)
+            region_x2 = min(depth_image.shape[1], x + 11)
+            region_y1 = max(0, y - 10)
+            region_y2 = min(depth_image.shape[0], y + 11)
+            
+            region = depth_image[region_y1:region_y2, region_x1:region_x2]
+            valid_pixels_in_region = np.count_nonzero(region)
+            total_pixels_in_region = region.size
+            
+            print(f"In surrounding 20x20 region: {valid_pixels_in_region}/{total_pixels_in_region} pixels have valid depth")
+            
+            if valid_pixels_in_region == 0:
+                print("This region appears to have no depth data - this could be normal for:")
+                print("  - Reflective surfaces")
+                print("  - Very dark or very bright objects")
+                print("  - Objects too close or too far")
+                print("  - Areas outside camera's depth range")
+                
+            return None
 
     def get_camera_coordinates(self, x, y):
         """根据像素坐标转换为相机坐标系中的 3D 坐标。"""
@@ -233,12 +279,25 @@ class RealSenseCamera(Node):
         # 获取深度值
         if depth_value==None or depth_value <= 0 or np.isnan(depth_value):
             # raise ValueError(f"Invalid depth value at ({x}, {y}): {depth_value}")
-            self.get_logger().warn(f"Invalid depth value at ({x}, {y}): {depth_value}")
+            print(f"Invalid depth value at ({x}, {y}): {depth_value}")
             camera_coordinates= np.array([0, 0, 0])
         else:
+            # 转换深度值从毫米到米 (RealSense depth is in mm)
+            depth_in_meters = depth_value / 1000.0
+            
+            # 获取相机内参
+            fx, fy, cx, cy = self.K[0, 0], self.K[1, 1], self.K[0, 2], self.K[1, 2]
+            
             # 计算相机坐标系中的 3D 坐标
-            camera_coordinates = (np.linalg.inv(self.K) @ np.array([x, y, 1]) * depth_value).reshape(3, 1)
-            self.get_logger().warn(f"Camera Coordinates: {camera_coordinates.flatten()}")
+            # 使用正确的投影公式：X = (u - cx) * Z / fx, Y = (v - cy) * Z / fy, Z = depth
+            camera_x = (x - cx) * depth_in_meters / fx
+            camera_y = (y - cy) * depth_in_meters / fy
+            camera_z = depth_in_meters
+            
+            camera_coordinates = np.array([camera_x, camera_y, camera_z]).reshape(3, 1)
+            
+            self.get_logger().info(f"Depth value at ({x}, {y}): {depth_value} mm -> {depth_in_meters} m")
+            self.get_logger().info(f"Camera Coordinates: [{camera_x:.4f}, {camera_y:.4f}, {camera_z:.4f}]")
 
         return camera_coordinates
 
@@ -250,55 +309,29 @@ class RealSenseCamera(Node):
         # 使用外参矩阵进行转换
         # print("Rotation Matrix:", self.R)
         # print("Translation Vector:", self.t)
-        if camera_coordinates[0]==0 and camera_coordinates[1]==0 and camera_coordinates[2]==0: # 当深度值无效时全部赋值为0
+        
+        # 检查相机坐标是否有效 (处理无效深度值的情况)
+        if np.array_equal(camera_coordinates, np.array([0, 0, 0])) or (camera_coordinates.shape == (3, 1) and np.all(camera_coordinates == 0)):
             # raise ValueError(f"Invalid camera coordinates at ({x}, {y}): {camera_coordinates}")
-            self.get_logger().warn(f"Invalid camera coordinates at ({x}, {y}): {camera_coordinates}")
+            print(f"Invalid camera coordinates at ({x}, {y}): {camera_coordinates}")
             world_coordinates = np.array([0, 0, 0])
         else:
-            self.get_logger().info(f"Converting to world coordinates for pixel ({x}, {y}, camera_coordinates: {camera_coordinates.flatten()})")
-            # self.get_logger().info(f"Using Rotation Matrix:\n{self.R}")
-            # self.get_logger().info(f"Using Translation Vector:\n{self.t}")
-            # self.get_logger().info(f"{camera_coordinates - self.t}, shape: {camera_coordinates.shape}")
-            # world_coordinates = np.linalg.inv(self.R) @ (camera_coordinates - self.t)
-            world_coordinates = (self.R @ camera_coordinates) + self.t
-            self.get_logger().info(f"alternative world coord: {camera_coordinates @ self.R + self.t}")
-            # print("World Coordinates:", world_coordinates)
-        print("World Coordinates:", world_coordinates.flatten())
-        # draw a circle on the rgb image for debug
-        if self.rgb_image is not None:
-            debug_image = self.rgb_image.copy()
-            cv2.circle(debug_image, (x, y), 5, (0, 255, 0), -1)
-            cv2.putText(debug_image, f"World: {world_coordinates.flatten()}", (x+10, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(debug_image, f"Camera coordinate: {camera_coordinates.flatten()}", (x+10, y+10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-            cv2.imwrite(f"realsense_log/debug_rgb_x{x}_y{y}.png", debug_image)
+            # 确保camera_coordinates是列向量
+            if camera_coordinates.shape == (3,):
+                camera_coordinates = camera_coordinates.reshape(3, 1)
+            
+            world_coordinates = np.linalg.inv(self.R) @ (camera_coordinates - self.t)
+            # alternative = self.R @ (camera_coordinates - self.t)  # 另一种计算方式
+            self.get_logger().info(f"World Coordinates: {world_coordinates.flatten()}, Camera Coordinates: {camera_coordinates.flatten()}")
         return world_coordinates.flatten()  # 返回扁平化的 3D 坐标，形状为 (3,)
+
+
+
 
     def close(self):
         """Shutdown the ROS2 node"""
         self.destroy_node()
-    
-    def transform_point(self, camera_coordinates, transform_matrix):
-        """
-        Transform a point from camera frame to base frame.
 
-        Args:
-            camera_coordinates (np.ndarray): shape (3,1) or (3,)
-            transform_matrix (np.ndarray): 4x4 homogeneous matrix
-
-        Returns:
-            np.ndarray: shape (3,), point in base frame
-        """
-        # Ensure correct shape
-        p_c = np.asarray(camera_coordinates).reshape(3,)
-        
-        # Convert to homogeneous (4,)
-        p_c_h = np.append(p_c, 1.0)
-        
-        # Transform
-        p_b_h = transform_matrix @ p_c_h
-        
-        # Return as 3D
-        return p_b_h[:3] / p_b_h[3]
 
 def main(args=None):
     """Main function to run the camera node"""
@@ -308,28 +341,22 @@ def main(args=None):
         camera = RealSenseCamera()
         
         while rclpy.ok():
-            rclpy.spin_once(camera, timeout_sec=0.5)
+            rclpy.spin_once(camera, timeout_sec=0.1)
             
             # 获取并显示 RGB 和深度图像
             try:
                 rgb_image = camera.capture_image("rgb")
                 depth_image = camera.capture_image("depth")
-                depth = camera.get_world_coordinates(605, 322)
-                print(depth)
-                time.sleep(1)
 
-                # if rgb_image is not None:
-                #     cv2.imshow("RGB Image", rgb_image)
-                # if depth_image is not None:
-                #     cv2.imshow("Depth Image", depth_image)
+                if rgb_image is not None:
+                    cv2.imshow("RGB Image", rgb_image)
+                if depth_image is not None:
+                    cv2.imshow("Depth Image", depth_image)
 
-                # # 按下 'q' 键退出循环
-                # if cv2.waitKey(1) & 0xFF == ord('q'):
-                #     break
-                
-            except Exception as e:
-                print(e)
-                time.sleep(1)
+                # 按下 'q' 键退出循环
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            except Exception:
                 pass  # Images not available yet
                 
     except KeyboardInterrupt:

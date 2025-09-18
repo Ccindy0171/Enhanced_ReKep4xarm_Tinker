@@ -91,6 +91,7 @@ def request_gpt4v(message, image):
     global chat_history
     payload = prepare_inputs(message, image)
     response = requests.post("https://api.openai-hk.com/v1/chat/completions", headers=headers, json=payload)
+    print(response.json())
     res = response.json()['choices'][0]['message']['content']
     chat_history = payload
     chat_history['messages'].append({
