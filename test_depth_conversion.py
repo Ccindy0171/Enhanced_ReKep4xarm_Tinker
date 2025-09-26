@@ -150,6 +150,23 @@ def optical_to_base(p_optical_xyz_m, t_bc_m, q_bc_xyzw):
     p_base = R_bc @ p_link + t_bc
     return p_base
 
+t_bc = np.array([-0.095370, -0.408400, 0.457804])  # meters
+q_bc = np.array([-0.004694, 0.267570, 0.192732, 0.944054])  # [x,y,z,w]
+R_bc = R.from_quat(q_bc).as_matrix()
+
+# Fixed: camera_link <- color_optical_frame (optical -> link)
+R_link_from_opt = np.array([
+    [0,  0,  1],
+    [-1, 0,  0],
+    [0, -1,  0]
+], dtype=float)
+
+# Compose base <- optical
+R_base_from_opt = R_bc @ R_link_from_opt
+T_base_from_opt = np.eye(4)
+T_base_from_opt[:3,:3] = R_base_from_opt
+T_base_from_opt[:3, 3]  = t_bc
+
 if __name__ == "__main__":
     # Example: point in camera frame (meters)
     # p_c = np.array([-0.117338, -0.065865, 1.085111])
@@ -161,4 +178,8 @@ if __name__ == "__main__":
 
     print("Camera point:", p_c)
     print("Base point:", p_b)
+
+    p_opt = np.array([p_c[0], p_c[1], p_c[2], 1])
+
+    print("Base from optical T", T_base_from_opt @ p_opt)
     # test_depth_conversion()

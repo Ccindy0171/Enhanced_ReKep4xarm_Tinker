@@ -35,6 +35,8 @@ import cv2
 import threading
 from skimage.draw import disk, line
 from configparser import ConfigParser
+from threading import Lock
+import time
         
         
 class MainRekepNode(Node):
@@ -48,9 +50,9 @@ class MainRekepNode(Node):
             ip = parser.get('xArm', 'ip')
             print("Connecting to xArm at IP:", ip)
         except:
-            ip = input('Please input the xArm ip address[192.168.1.237]:')
+            ip = input('Please input the xArm ip address[192.168.1.217]:')
             if not ip:
-                ip = '192.168.1.237'
+                ip = '192.168.1.217'
         
         global_config = get_config(config_path="./rekep/configs/config.yaml")
         self.config = global_config['main']
@@ -76,9 +78,9 @@ class MainRekepNode(Node):
         self.robot.set_mode(6)
         self.robot.set_state(0)
         self.robot.set_servo_angle(angle=[0.0,
-                                    -34.0,
+                                    -14.0,
                                     -1.0,
-                                    25.0,
+                                    75.0,
                                     0.0,
                                     47.0,
                                     -1.0], speed=50)
@@ -116,7 +118,7 @@ class MainRekepNode(Node):
         self.visualize = True
         # OpenAI client
         self.ai_client = OpenAI(
-            base_url = "https://api.openai-hk.com/v1",
+            base_url = "http://220.196.173.235:8001/v1",
             api_key=os.environ['OPENAI_API_KEY']
             )
 
@@ -126,17 +128,20 @@ class MainRekepNode(Node):
 
         # ROS2 publishers
         self.pub = self.create_publisher(Int32MultiArray, '/tracking_points', 10)
-        self.grasp_pub = self.create_publisher(Point, 'target_point', 10)
+        self.grasp_pub = self.create_publisher(Point, '/target_point', 10)
+
+        self.grasp_lock = Lock()
         
         # Storage for received grasp message
         self.received_grasp_msg = None
         
+
         # Create subscription for grasp poses
         self.grasp_sub = self.create_subscription(
-            Float32MultiArray, 'grasp_pose', self.grasp_callback, 10)
+            Float32MultiArray, '/grasp_pose', self.grasp_callback, 10)
         
         self.get_logger().info("MainRekepNode initialized")
-        
+
     def grasp_callback(self, msg):
         """Callback to receive grasp pose messages"""
         self.received_grasp_msg = msg
@@ -150,11 +155,41 @@ class MainRekepNode(Node):
         while self.received_grasp_msg is None and (time.time() - start_time) < timeout:
             rclpy.spin_once(self, timeout_sec=0.1)
             
-        if self.received_grasp_msg is None:
+        if self.received_grasp_msg is None: 
             self.get_logger().warn("Timeout occurred while waiting for grasp pose.")
             return None
         else:
             return self.received_grasp_msg
+        
+    # def grasp_callback(self, msg):
+    #     """Callback to receive grasp pose messages"""
+    #     while not self.grasp_lock.acquire(timeout=5.0):
+    #         self.get_logger().warn("Waiting to acquire lock for grasp message...")
+    #     self.received_grasp_msg = msg
+    #     self.get_logger().info(f"Received grasp pose: {msg.data}")
+    #     self.grasp_lock.release()
+        
+    # def wait_for_grasp_message(self, timeout=10.0):
+    #     self.get_logger().info("Starting to wait for grasp pose message...")
+    #     """Wait for grasp message with timeout"""
+    #     start_time = time.time()
+    #     received_grasp_msg = None
+
+    #     while received_grasp_msg is None and (time.time() - start_time) < timeout:
+    #         self.get_logger().info("Waiting for grasp pose message...")
+    #         while not self.grasp_lock.acquire(timeout=1.0):
+    #             self.get_logger().warn("Waiting to acquire lock for grasp message...")
+    #             time.sleep(0.5)
+    #         received_grasp_msg = self.received_grasp_msg
+    #         self.received_grasp_msg = None
+    #         self.grasp_lock.release()
+    #         time.sleep(0.2)
+ 
+    #     if received_grasp_msg is None:
+    #         self.get_logger().warn("Timeout occurred while waiting for grasp pose.")
+    #         return None
+    #     else:
+    #         return received_grasp_msg
 
     def perform_task(self, instruction, rekep_program_dir=None, disturbance_seq=None):
         # Wait for RGB image to be available
@@ -191,9 +226,11 @@ class MainRekepNode(Node):
         if rekep_program_dir is None:
             keypoints,pixels, projected_img = self.keypoint_proposer.get_keypoints(rgb, points, mask)
             # convert pixels to world coordinate and log
-            for pixel in pixels:
+            for idx, pixel in enumerate(pixels):
                 world_coord = self.camera.get_world_coordinates(pixel[1], pixel[0])
                 self.get_logger().info(f"Pixel {pixel} -> World Coord {world_coord}")
+                # keypoints[idx] = world_coord
+                
             print(f'{bcolors.HEADER}Got {len(keypoints)} proposed keypoints{bcolors.ENDC}')
             if self.visualize:
                 self.visualizer.show_img(projected_img)
@@ -213,6 +250,35 @@ class MainRekepNode(Node):
                     print(f'{bcolors.WARNING}Warning: {i} is out of range{bcolors.ENDC}')
             print(f'{bcolors.HEADER}Got {len(tracking_points)} target keypoints{tracking_points}{bcolors.ENDC}')
 
+            # 使用ros 发布器发布
+            msg = Int32MultiArray()
+            # 展平为1维整数数组
+            self.get_logger().info("Preparing to send tracking points: " + str([item for sublist in tracking_points for item in (sublist[:1] + sublist[1:])]))
+            msg.data = [int(item) for sublist in tracking_points for item in (sublist[:1] + sublist[1:])]
+            self.get_logger().info(f"Sending: {msg.data}")
+            self.pub.publish(msg)
+        # load metadata and send tracking points
+        else:
+            self.get_logger().info(f"Using existing ReKep program directory: {rekep_program_dir}")
+            with open(os.path.join(rekep_program_dir, 'metadata.json'), 'r') as f:
+                metadata = json.load(f)
+            points = metadata['init_keypoint_positions']
+            # back project 3d world coord points into camera pixel coord
+            pixels = []
+            tracking_points = []
+            for point in points:
+                pixel = self.camera.world_to_pixel_coordinates(point)
+                pixels.append(pixel)
+                if pixel is not None:
+                    tracking_points.append([len(pixels)-1, pixel[0], pixel[1]])
+            
+            # for i in self.tarcking_keypoints_idx:
+            #     tracking_points.append([i, pixels[i][1], pixels[i][0]])
+            #     if pixels[i][1]<280:
+            #         # warning
+            #         print(f'{bcolors.WARNING}Warning: {i} is out of range{bcolors.ENDC}')
+            print(f'{bcolors.HEADER}Got {len(tracking_points)} target keypoints{tracking_points}{bcolors.ENDC}')
+            print(tracking_points)
             # 使用ros 发布器发布
             msg = Int32MultiArray()
             # 展平为1维整数数组
@@ -272,7 +338,7 @@ class MainRekepNode(Node):
         start = time.time()
         for chunk in stream:
             print(f'[{time.time()-start:.2f}s] Querying OpenAI API...', end='\r')
-            if chunk.choices[0].delta.content is not None:
+            if chunk.choices and hasattr(chunk.choices[0].delta, "content") and chunk.choices[0].delta.content is not None:
                 output += chunk.choices[0].delta.content
         print(f'[{time.time()-start:.2f}s] Querying OpenAI API...Done')
         
@@ -310,7 +376,7 @@ class MainRekepNode(Node):
         start = time.time()
         for chunk in stream:
             print(f'[{time.time()-start:.2f}s] Querying OpenAI API...', end='\r')
-            if chunk.choices[0].delta.content is not None:
+            if chunk.choices and hasattr(chunk.choices[0].delta, "content") and chunk.choices[0].delta.content is not None:
                 output += chunk.choices[0].delta.content
         print(f'[{time.time()-start:.2f}s] Querying OpenAI API...Done')
         
@@ -433,7 +499,8 @@ class MainRekepNode(Node):
                 next_subgoal = self._get_next_subgoal(from_scratch=self.first_iter)
                 print("Next subgoal1:", next_subgoal)
             else:  
-                xyz = self.keypoints[self.subgoal_idxs[self.stage - 1]]
+                # xyz = self.keypoints[self.subgoal_idxs[self.stage]]
+                xyz = self.keypoints[self.subgoal_idxs[self.stage - 1]+1]
                 self.get_logger().info(f"Keypoint {self.subgoal_idxs[self.stage - 1]} position: {xyz}")   
                 if self.is_grasp_stage:    
                     target_point = Point()
@@ -446,25 +513,43 @@ class MainRekepNode(Node):
                     self.grasp_pub.publish(target_point)
 
                     # 接收grasp消息
-                    grasp_msg = self.wait_for_grasp_message(timeout=10.0)
+                    grasp_msg = self.wait_for_grasp_message(timeout=30.0)
 
                     # 当收到消息时，打印或处理数据
                     if grasp_msg:
                         self.get_logger().info(f"Received grasp pose: {grasp_msg.data}")
-                        _ = input("Press Enter to continue...")
                     else:
                         self.get_logger().warn("Timeout occurred while waiting for grasp pose.")
                     grasp_position = np.array(grasp_msg.data[:3]) * 1000.0 # 假设位置在列表的前3个元素
 
                     # 旋转矩阵数据：接下来的9个值（因为旋转矩阵是3x3的矩阵，总共9个元素）
                     grasp_orientation = np.array(grasp_msg.data[3:]).reshape(3, 3)  # 将剩余的值重塑为3x3矩阵
+                    
+                    # from scipy.spatial.transform import Rotation as R
+                    # R_z_180 = np.array([
+                    #     [-1, 0, 0],
+                    #     [0, -1, 0],
+                    #     [0, 0, 1]
+                    # ])
+                    # q03 = grasp_orientation @ R_z_180
+                    # ee_pose = self.env.get_ee_pose()
+                    # ee_mat = R.from_quat(ee_pose[3:]).as_matrix()
+                    # # 选择q02和q03中与ee_mat最接近的一个
+                    # if np.linalg.norm(grasp_orientation - ee_mat) < np.linalg.norm(q03 - ee_mat):
+                    #     grasp_orientation = R.from_matrix(grasp_orientation).as_quat()
+                    # else:
+                    #     grasp_orientation = R.from_matrix(q03).as_quat()
+
+
                     # 转换为四元数
                     grasp_orientation = T.mat2quat(grasp_orientation)
+                    
                     # 打印数据
                     self.get_logger().info(f"Received grasp position: {grasp_position}")
                     self.get_logger().info(f"Received grasp orientation:\n{grasp_orientation}")
                     next_subgoal = np.concatenate([grasp_position,grasp_orientation])
                     print("Next subgoal from anygrasp:", next_subgoal)
+                    _ = input("Press enter to continue...")
                 else:
                     next_subgoal = np.concatenate([xyz,self.curr_ee_pose[3:]])
                     print("self.subgoal_idxs[self.stage - 1]", self.subgoal_idxs[self.stage - 1])
@@ -472,9 +557,9 @@ class MainRekepNode(Node):
                     print("Next subgoal from keypoint:", next_subgoal)    
                 # OFFSET CODE
 
-                grasp_offset = np.array([0, 0, -10])
-                subgoal_pose_homo = T.convert_pose_quat2mat(next_subgoal)
-                next_subgoal[:3] += subgoal_pose_homo[:3, :3] @ grasp_offset
+                # grasp_offset = np.array([0, 0, -10])
+                # subgoal_pose_homo = T.convert_pose_quat2mat(next_subgoal)
+                # next_subgoal[:3] += subgoal_pose_homo[:3, :3] @ grasp_offset
 
             print("Next subgoal:", next_subgoal)
             # input("waiting...")
@@ -492,6 +577,8 @@ class MainRekepNode(Node):
             self.action_queue = next_path.tolist()
             print("Action shape:", np.array(self.action_queue).shape)
             self.env.execute_action(self.action_queue)
+            
+            _ = input("action executed, press enter to continue...")
             # self.env.sleep(15)
             if self.is_grasp_stage:
                 self._execute_grasp_action()
@@ -599,6 +686,8 @@ class MainRekepNode(Node):
         print("pregrasp_pose", pregrasp_pose)
         # print("pose in grasp", pose)
         pregrasp_pose[:3] += T.quat2mat(pregrasp_pose[3:]) @ np.array([0, 0, self.config['grasp_depth']])
+        print("pregrasp_pose after", pregrasp_pose)
+        _ = input("Press enter to execute grasp...")
         grasp_action = np.concatenate([pregrasp_pose, [self.env.get_gripper_close_action()]])
         grasp_action = grasp_action.reshape(1, -1)
         self.env.execute_action(grasp_action, precise=True)
@@ -617,7 +706,7 @@ if __name__ == "__main__":
         'battery': {
             'scene_file': './configs/og_scene_file_red_pen.json',
             'instruction': 'give me a tennis ball',
-            'rekep_program_dir': './rekep/vlm_query/2025-03-16_19-54-00_pick_up_plastic_bottle_and_set_it_next_to_the_water_bottle'
+            'rekep_program_dir': './rekep/vlm_query/2025-09-24_22-49-36_give_me_a_tennis_ball'
         },
         'block': {
             'scene_file': './configs/og_scene_file_red_pen.json',

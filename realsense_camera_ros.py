@@ -1,3 +1,4 @@
+import math
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
@@ -157,7 +158,6 @@ class RealSenseCamera(Node):
     def pixel_to_3d_points(self):
         depth_pc = self.capture_points()
         K_inv = np.linalg.inv(self.K)
-        R_inv = np.linalg.inv(self.R)
 
         # Get array of valid pixel locations
         shape = depth_pc.shape
@@ -169,7 +169,16 @@ class RealSenseCamera(Node):
         # Convert pixel to world coordinates
         s = depth_pc[yv, xv]
         pc_camera = s * (K_inv @ pc_all)
-        pw_final = (R_inv @ (pc_camera - self.t)).T
+
+        # display pc_camera using open3d
+        import open3d as o3d
+        # pc = o3d.geometry.PointCloud()
+        # pc.points = o3d.utility.Vector3dVector(pc_camera.T)
+        # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=500, origin=[0, 0, 0])
+        # o3d.visualization.draw_geometries([pc, axis], window_name="PointCloud in Camera Frame")
+
+        # pw_final = (R_inv @ (pc_camera - self.t)).T
+        pw_final = ((self.R @ pc_camera) + self.t).T  # use R,t to convert to world coordinates
         pw_final = pw_final.reshape(shape[0], shape[1], 3)
 
         self.get_logger().info(f"Converted pixel to 3D points, shape: {pw_final.shape}")
@@ -178,12 +187,73 @@ class RealSenseCamera(Node):
         import open3d as o3d
         pc = o3d.geometry.PointCloud()
         pc.points = o3d.utility.Vector3dVector(pw_final.reshape(-1, 3))
-        # draw the axis at the origin as well
-        # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=100.0, origin=[0, 0, 0])
-        # pc += axis
-        o3d.visualization.draw_geometries([pc])
+        # Create a larger, thicker coordinate frame at the origin (world axis)
+        axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=500, origin=[0, 0, 0])
+        # Optionally, set a background color and point size for better visibility
+        o3d.visualization.draw_geometries(
+            [pc, axis],
+            window_name="PointCloud with World Axis",
+            point_show_normal=False,
+            width=1280,
+            height=720,
+            left=50,
+            top=50,
+            mesh_show_wireframe=False,
+            mesh_show_back_face=False
+        )
 
         return pw_final
+    
+    def world_to_pixel_coordinates(self, world_coordinates):
+        """
+        Project a 3D point in base/world frame into pixel coordinates of the color optical frame.
+
+        Args:
+            world_coordinates : array-like, shape (3,), meters in base/world frame.
+
+        Uses:
+            self.R : (3,3) rotation of base <- optical  (optical -> base)
+            self.t : (3,)   translation of base <- optical (meters)
+            self.K : (3,3) camera intrinsics for the color optical frame
+
+        Returns:
+            (u, v, Z_opt) where u,v are pixel coordinates (floats), Z_opt is depth in meters
+            Returns (None, None, Z_opt) if point is behind the camera (Z_opt <= 0) or invalid.
+        """
+        # Ensure shapes
+        R_bo = np.asarray(self.R, dtype=np.float64)           # base <- optical
+        t_bo = np.asarray(self.t, dtype=np.float64).reshape(3, 1)
+        K     = np.asarray(self.K, dtype=np.float64)
+
+        p_b = np.asarray(world_coordinates, dtype=np.float64).reshape(3, 1)
+
+        # Invert extrinsics analytically to get optical <- base
+        # R_ob = R_bo^T ; t_ob = -R_bo^T @ t_bo
+        R_ob = R_bo.T
+        t_ob = -R_ob @ t_bo
+
+        # Transform base -> optical
+        p_opt = R_ob @ p_b + t_ob   # (3,1)
+        X, Y, Z = p_opt.flatten()
+
+        # Point behind the camera or invalid
+        if not np.isfinite(Z) or Z <= 0:
+            self.get_logger().warn(f"Point {world_coordinates} is behind the camera or invalid (Z={Z})")
+            return None
+
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
+
+        u = (fx * X / Z) + cx
+        v = (fy * Y / Z) + cy
+
+        # Optional: sanity check for NaNs/Infs
+        if not (np.isfinite(u) and np.isfinite(v)):
+            return None, None, Z
+        
+        self.get_logger().info(f"Projected world point {world_coordinates} to pixel ({u}, {v}) with depth {Z}m")
+
+        return [round(u), round(v)]
     
     def get_average_depth(self, x, y):
         """根据周围9个点计算深度值的平均值，并去掉无效点。"""
@@ -238,7 +308,7 @@ class RealSenseCamera(Node):
         else:
             # 计算相机坐标系中的 3D 坐标
             camera_coordinates = (np.linalg.inv(self.K) @ np.array([x, y, 1]) * depth_value).reshape(3, 1)
-            self.get_logger().warn(f"Camera Coordinates: {camera_coordinates.flatten()}")
+            self.get_logger().info(f"Camera Coordinates: {camera_coordinates.flatten()}")
 
         return camera_coordinates
 
@@ -261,7 +331,7 @@ class RealSenseCamera(Node):
             # self.get_logger().info(f"{camera_coordinates - self.t}, shape: {camera_coordinates.shape}")
             # world_coordinates = np.linalg.inv(self.R) @ (camera_coordinates - self.t)
             world_coordinates = (self.R @ camera_coordinates) + self.t
-            self.get_logger().info(f"alternative world coord: {camera_coordinates @ self.R + self.t}")
+            # self.get_logger().info(f"alternative world coord: {camera_coordinates @ self.R + self.t}")
             # print("World Coordinates:", world_coordinates)
         print("World Coordinates:", world_coordinates.flatten())
         # draw a circle on the rgb image for debug
@@ -316,16 +386,21 @@ def main(args=None):
                 depth_image = camera.capture_image("depth")
                 depth = camera.get_world_coordinates(605, 322)
                 print(depth)
-                time.sleep(1)
 
-                # if rgb_image is not None:
-                #     cv2.imshow("RGB Image", rgb_image)
-                # if depth_image is not None:
-                #     cv2.imshow("Depth Image", depth_image)
+                # camera_coord = camera.world_to_pixel_coordinates(
+                #     [454.43570167, -32.75466571, -17.55472957]
+                #     )
+                # print(camera_coord)
+                # time.sleep(1)
 
-                # # 按下 'q' 键退出循环
-                # if cv2.waitKey(1) & 0xFF == ord('q'):
-                #     break
+                if rgb_image is not None:
+                    cv2.imshow("RGB Image", rgb_image)
+                if depth_image is not None:
+                    cv2.imshow("Depth Image", depth_image)
+
+                # 按下 'q' 键退出循环
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
                 
             except Exception as e:
                 print(e)

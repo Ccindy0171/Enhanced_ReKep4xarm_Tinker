@@ -4,6 +4,7 @@ import base64
 import traceback
 import requests
 from io import BytesIO
+from openai import OpenAI
 
 # Get OpenAI API Key from environment variable
 api_key = os.environ["OPENAI_API_KEY"]
@@ -14,9 +15,13 @@ headers = {
 
 metaprompt = '''
 - For any marks mentioned in your answer, please highlight them with [].
-'''    
+'''
+
+client = OpenAI(api_key=api_key, base_url="http://220.196.173.235:8001/v1")
 
 chat_history = None
+
+
 
 def clear_history():
     global chat_history
@@ -45,8 +50,10 @@ def prepare_inputs(message, image):
             "messages": [
             {
                 "role": "system",
-                "content": [
-                    metaprompt
+                "content": [{
+                    "type": "text",
+                    "text": metaprompt
+                }
                 ]
             }, 
             {
@@ -90,9 +97,14 @@ def prepare_inputs(message, image):
 def request_gpt4v(message, image):
     global chat_history
     payload = prepare_inputs(message, image)
-    response = requests.post("https://api.openai-hk.com/v1/chat/completions", headers=headers, json=payload)
-    print(response.json())
-    res = response.json()['choices'][0]['message']['content']
+    # print(payload['messages'])
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=payload['messages'],
+        max_tokens=800
+    )
+    # response = requests.post("http://220.196.173.235:8001/v1", headers=headers, json=payload)
+    res = response.choices[0].message.content
     chat_history = payload
     chat_history['messages'].append({
         "role": "assistant",

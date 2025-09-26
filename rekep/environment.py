@@ -109,7 +109,8 @@ class ReKepEnv:
             if i in idx_obj_map.keys():
                 obj = idx_obj_map[i]
 
-            img_coord = self.endeffector.convert_world_to_point(camera, k)
+            img_coord = camera.world_to_pixel_coordinates(k)
+            # img_coord = self.endeffector.convert_world_to_point(camera, k)
             print(f"Keypoint {i}: Object: {obj}, World Coord: {k}, Image Coord: {img_coord}")
             self._keypoint_registry[i] = {"object": obj, 
                                           "keypoint": k,
@@ -138,7 +139,7 @@ class ReKepEnv:
             while not tracking_points or not point_idx:
                 if self.node:
                     self.node.get_logger().info("Waiting for tracking points to be updated...")
-                rclpy.spin_once(self.node, timeout_sec=0.5)
+                rclpy.spin_once(self.node, timeout_sec=3.0)
 
         
         print("tracking_points", tracking_points)
@@ -426,9 +427,11 @@ class ReKepEnv:
             self.set_ee_pose(pose[:7])
         # move to the final pose with required precision
         pose = pose_seq[-1]
-        print("final pose:", pose[:3])
+        print("final pose:", pose[:3])       
+        
         # self._move_to_waypoint(pose, pos_threshold, rot_threshold, max_steps=20 if not precise else 40) 
         self.set_ee_pose(pose[:7])
+         
         # compute error
         # pos_error, rot_error = self.compute_target_delta_ee(target_pose)
         pos_error, rot_error = 0, 0

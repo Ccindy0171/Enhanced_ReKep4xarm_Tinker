@@ -51,7 +51,8 @@ class KeypointProposer:
         # self.device = torch.device(self.config['device'])
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         rprint(f"[blue]KeypointProposer Using device: {self.device}[/blue]")
-        self.dinov2 = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14').eval().to(self.device)
+        self.dinov2 = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14').eval()
+        self._dinov2_loaded = False  # Flag to track if dinov2 is loaded on device
         self.bounds_min = np.array(self.config['bounds_min'])
         self.bounds_max = np.array(self.config['bounds_max'])
         self.mean_shift = MeanShift(bandwidth=self.config['min_dist_bt_keypoints'], max_iter=400, bin_seeding=True, n_jobs=32)
@@ -61,12 +62,12 @@ class KeypointProposer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(self.config['seed'])
 
-    def get_keypoints(self, rgb, points, masks):
+    def get_keypoints(self, rgb, points, masks, max_keypoints=6):
         # preprocessing
         transformed_rgb, rgb, points, masks, shape_info = self._preprocess(rgb, points, masks)
         # get features
         features_flat = self._get_features(transformed_rgb, shape_info)
-        # for each mask, cluster in feature space to get meaningful regions, and uske their centers as keypoint candidates
+        # for each mask, cluster in feature space to get meaningful regions, and use their centers as keypoint candidates
         candidate_keypoints, candidate_pixels, candidate_rigid_group_ids = self._cluster_features(points, features_flat, masks, rgb=rgb)
 
         # merge close points by clustering in cartesian space
@@ -75,6 +76,27 @@ class KeypointProposer:
         candidate_keypoints = candidate_keypoints[merged_indices]
         candidate_pixels = candidate_pixels[merged_indices]
         candidate_rigid_group_ids = candidate_rigid_group_ids[merged_indices]
+
+        # Limit number of keypoints to max_keypoints, distributed across clusters
+        if max_keypoints is not None and len(candidate_keypoints) > max_keypoints:
+            # Distribute keypoints across clusters as evenly as possible
+            unique_groups = np.unique(candidate_rigid_group_ids)
+            per_group = max_keypoints // len(unique_groups)
+            selected_indices = []
+            for group in unique_groups:
+                group_indices = np.where(candidate_rigid_group_ids == group)[0]
+                np.random.shuffle(group_indices)
+                selected_indices.extend(group_indices[:per_group])
+            # If not enough, fill up with remaining keypoints
+            if len(selected_indices) < max_keypoints:
+                remaining = list(set(range(len(candidate_keypoints))) - set(selected_indices))
+                np.random.shuffle(remaining)
+                selected_indices.extend(remaining[:max_keypoints - len(selected_indices)])
+            selected_indices = selected_indices[:max_keypoints]
+            candidate_keypoints = candidate_keypoints[selected_indices]
+            candidate_pixels = candidate_pixels[selected_indices]
+            candidate_rigid_group_ids = candidate_rigid_group_ids[selected_indices]
+
         # sort candidates by locations
         sort_idx = np.lexsort((candidate_pixels[:, 0], candidate_pixels[:, 1]))
         candidate_keypoints = candidate_keypoints[sort_idx]
@@ -82,7 +104,7 @@ class KeypointProposer:
         candidate_rigid_group_ids = candidate_rigid_group_ids[sort_idx]
         # project keypoints to image space
         projected = self._project_keypoints_to_img(rgb, candidate_pixels, candidate_rigid_group_ids, masks, features_flat)
-        return candidate_keypoints,candidate_pixels, projected
+        return candidate_keypoints, candidate_pixels, projected
 
     def _preprocess(self, rgb, points, masks):
         # 如果 masks 是列表，将其转换为 NumPy 数组
@@ -142,7 +164,13 @@ class KeypointProposer:
         rprint(f"[cyan]Debug: shape_info: {shape_info}[/cyan]")
         rprint(f"[cyan]Debug: transformed_rgb shape: {transformed_rgb.shape}[/cyan]")
 
-        # get features
+        # Lazy load dinov2 and move to device only when needed
+        if not hasattr(self, '_dinov2_loaded') or not self._dinov2_loaded:
+            self.dinov2 = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14').eval().to(self.device)
+            self._dinov2_loaded = True
+        else:
+            self.dinov2 = self.dinov2.to(self.device)
+
         img_tensors = torch.from_numpy(transformed_rgb).permute(2, 0, 1).unsqueeze(0).to(self.device)  # float32 [1, 3, H, W]
         assert img_tensors.shape[1] == 3, "unexpected image shape"
         
@@ -153,9 +181,15 @@ class KeypointProposer:
         interpolated_feature_grid = interpolate(raw_feature_grid.permute(0, 3, 1, 2),  # float32 [num_cams, feature_dim, patch_h, patch_w]
                                                 size=(img_h, img_w),
                                                 mode='bilinear').permute(0, 2, 3, 1).squeeze(0)  # float32 [H, W, feature_dim]
+        torch.clear_autocast_cache()
         rprint(f"[cyan]Debug: interpolated_feature_grid shape: {interpolated_feature_grid.shape}[/cyan]")
         features_flat = interpolated_feature_grid.reshape(-1, interpolated_feature_grid.shape[-1])  # float32 [H*W, feature_dim]
         rprint(f"[cyan]Debug: features_flat shape: {features_flat.shape}[/cyan]")
+
+        # Move dinov2 back to cpu to free up cuda memory
+        self.dinov2 = self.dinov2.to('cpu')
+        torch.cuda.empty_cache()
+
         return features_flat
 
     def _cluster_features(self, points, features_flat, masks, rgb):
@@ -210,6 +244,8 @@ class KeypointProposer:
                 # Skip clusters with no members or all zero coordinates
                 if len(member_points[closest_idx]) == 0 or np.all(member_points[closest_idx] == 0):
                     continue
+                if member_points[closest_idx][2] > self.config['max_z']:
+                    continue
                 candidate_keypoints.append(member_points[closest_idx])
                 candidate_pixels.append(member_pixels[closest_idx])
                 candidate_rigid_group_ids.append(rigid_group_id)
@@ -251,7 +287,7 @@ class KeypointProposer:
 
         # from PIL import Image
         # Image.fromarray(image).convert("RGB").save("candidate_keypoints.png")
-
+        torch.cuda.empty_cache()
         return candidate_keypoints, candidate_pixels, candidate_rigid_group_ids
 
     def _merge_clusters(self, candidate_keypoints):
